@@ -1,0 +1,3 @@
+# Run the nightly roster fill at 03:30 every day. Edit the folders and your name, then add the line with: crontab -e
+# SCRIPTORIUM_OWNERS lists the people who own this record (comma-separated); facts about them are never kept.
+30 3 * * * cd /path/to/scriptorium && mkdir -p /path/to/found && SCRIPTORIUM_OWNERS="Your Name" python3 engine/nightly.py --export /path/to/conversations.json --cards /path/to/people --out /path/to/found --model claude-sonnet-5-5 >> /path/to/found/nightly.log 2>&1

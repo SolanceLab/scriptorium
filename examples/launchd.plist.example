@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs the nightly roster fill at 03:30 every day on a Mac.
+     Save as ~/Library/LaunchAgents/com.example.scriptorium-nightly.plist, replace the placeholders (the command makes the found folder and its log itself),
+     then: launchctl load ~/Library/LaunchAgents/com.example.scriptorium-nightly.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.scriptorium-nightly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p /path/to/found &amp;&amp; exec /usr/bin/python3 /path/to/scriptorium/engine/nightly.py --export /path/to/conversations.json --cards /path/to/people --out /path/to/found --owner "Your Name" --model claude-sonnet-5-5 >> /path/to/found/nightly.log 2>&amp;1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
+</dict>
+</plist>

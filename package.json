@@ -1,0 +1,20 @@
+{
+  "name": "scriptorium-people-page",
+  "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:people-page": "node dashboard/example-host/build.mjs",
+    "people-page": "node dashboard/example-host/build.mjs && node dashboard/example-host/serve.mjs",
+    "test:dashboard": "vitest run --config dashboard/vitest.config.js && node --test dashboard/tests/serve.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.3",
+    "jsdom": "27.0.0",
+    "postcss": "8.5.32",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tailwindcss": "3.4.17",
+    "vitest": "4.1.12"
+  }
+}

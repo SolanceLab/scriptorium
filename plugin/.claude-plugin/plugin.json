@@ -1,0 +1,29 @@
+{
+  "name": "scriptorium",
+  "description": "Scriptorium: turn your chat history into memories you can check, each with its exact words, source lines and real date.",
+  "version": "1.0.0",
+  "author": { "name": "House of Solance" },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Server address",
+      "description": "Where your Scriptorium server answers, usually http://127.0.0.1:8795/mcp.",
+      "required": true
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Key",
+      "description": "The key you started your Scriptorium server with.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "mcpServers": {
+    "scriptorium": {
+      "type": "http",
+      "url": "${user_config.server_url}",
+      "headers": { "Authorization": "Bearer ${user_config.api_key}" }
+    }
+  }
+}

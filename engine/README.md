@@ -1,0 +1,1 @@
+The writers: write_memories.py (a chat export in, memories out) and write_people.py (memories in, person cards out), with their instructions. Optional, nightly: nightly.py (new messages in, facts and field suggestions out) and review.py (accept or dismiss the suggestions); found_in_chats.py and suggest_fields.py are the checks they share.
