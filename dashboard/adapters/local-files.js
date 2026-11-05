@@ -1,4 +1,4 @@
-// Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+// Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 // Browser adapter for the People page over your own files: it calls the JSON API that
 // example-host/serve.mjs serves next to the page. Same method names as HOST.md.
 // Cards are edited in their files in this version, so create/update/delete and links say so.

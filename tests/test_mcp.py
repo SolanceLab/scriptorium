@@ -1,4 +1,4 @@
-# Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+# Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The MCP server: keyed, local only, paths inside one folder, a model name but never a command.
 Run: python3 -m unittest discover -s engine/tests"""
 import json

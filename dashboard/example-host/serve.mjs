@@ -1,4 +1,4 @@
-// Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+// Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 // Serves the built People page and a small JSON API over your own files: the person cards a writer made,
 // and the facts, suggestions and accepted fields the nightly run keeps. It listens on this computer only.
 //   node serve.mjs --cards CARDS_DIR --out OUT_DIR [--port 8788] [--engine PATH_TO_review.py]

@@ -1,4 +1,4 @@
-# Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+# Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The roster fills itself: a nightly run of "found in chats" over the messages that are new since the last run.
 
     python3 nightly.py --export conversations.json --cards people --out found [--owner NAME ...]

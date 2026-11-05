@@ -1,4 +1,4 @@
-// Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+// Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 // A person's notes grow by prepending dated entries ("[2026-10-14] ...") at the
 // top, so the newest — including corrections — sit first and the original,
 // undated text sits last. For reading, show them newest first by date, and the

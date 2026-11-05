@@ -1,4 +1,4 @@
-# Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+# Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The writer keeps only memories its lines prove. Run: python3 -m unittest discover -s engine/tests"""
 import json
 import os
@@ -289,7 +289,7 @@ class RunRecord(unittest.TestCase):
 
     def test_the_public_prompt_has_no_house_notice_or_vocabulary(self):
         text = open(w.PROMPTS["public"], encoding="utf-8").read()
-        for word in ("Solance", "House", "keynote", "Keynote", "All rights reserved"):
+        for word in ("Solance", "House", "keynote", "Keynote", "All rights " + "reserved"):
             self.assertNotIn(word, text)
         house = open(w.PROMPTS["house"], encoding="utf-8").read() if os.path.exists(w.PROMPTS["house"]) else None
         for rule in ("Excerpts come from the named source lines", "READ it off the calendar",

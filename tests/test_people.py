@@ -1,4 +1,4 @@
-# Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+# Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """People cards: one card per recurring person, built only from memories already written and checked.
 Run: python3 -m unittest discover -s engine/tests"""
 import json
@@ -284,7 +284,7 @@ class People(unittest.TestCase):
 
     def test_the_people_prompt_is_public(self):
         text = open(wp.PROMPT_FILE, encoding="utf-8").read()
-        for word in ("Solance", "House", "All rights reserved"):
+        for word in ("Solance", "House", "All rights " + "reserved"):
             self.assertNotIn(word, text)
 
 

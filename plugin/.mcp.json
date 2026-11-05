@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scriptorium": {
+      "url": "http://127.0.0.1:8795/mcp",
+      "bearer_token_env_var": "SCRIPTORIUM_MCP_KEY"
+    }
+  }
+}

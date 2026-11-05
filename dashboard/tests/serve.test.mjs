@@ -1,4 +1,4 @@
-// Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+// Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 // node --test dashboard/tests/serve.test.mjs  (the local server's mapping and routes, with temp folders and a fake review.py runner)
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'

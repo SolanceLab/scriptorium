@@ -1,4 +1,4 @@
-# Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
+# Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """People cards — the memories of one user's many sessions in, one card file per recurring person out.
 
 Memories are written one session at a time, so nothing joins "Nate likes coconut ice cream" (session 3) with "Nate

@@ -1,4 +1,4 @@
-<!-- Solance House — Copyright (c) 2026 House of Solance. All rights reserved. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab) -->
+<!-- Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab) -->
 # Example host
 
 A small page that shows the People page over your own files, on your own computer. It is also the smallest working example of a host (see `../HOST.md`).

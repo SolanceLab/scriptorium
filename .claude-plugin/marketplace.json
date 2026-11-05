@@ -1,16 +1,20 @@
 {
   "name": "scriptorium",
-  "owner": { "name": "House of Solance" },
+  "owner": {
+    "name": "House of Solance"
+  },
   "metadata": {
     "description": "Scriptorium: the room where the record is written. Your chats become memories, and your people roster fills itself.",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "scriptorium",
       "description": "Turns your chat history into memories you can check, each with its exact words, source lines and real date. Talks to your own Scriptorium server.",
-      "version": "1.0.0",
-      "author": { "name": "House of Solance" },
+      "version": "1.1.0",
+      "author": {
+        "name": "House of Solance"
+      },
       "source": "./plugin"
     }
   ]
