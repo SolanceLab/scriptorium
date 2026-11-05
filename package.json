@@ -9,7 +9,7 @@
     "test:dashboard": "vitest run --config dashboard/vitest.config.js && node --test dashboard/tests/serve.test.mjs"
   },
   "devDependencies": {
-    "esbuild": "0.27.3",
+    "esbuild": "0.28.1",
     "jsdom": "27.0.0",
     "postcss": "8.5.32",
     "react": "19.2.4",
