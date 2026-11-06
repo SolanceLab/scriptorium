@@ -35,6 +35,24 @@ SCRIPTORIUM_MCP_KEY=<a long random key> python3 mcp/server.py --root ~/scriptori
 
 Put your `conversations.json` inside that folder.
 
+## Use in Codex
+
+Scriptorium installs in Codex too, from the SolanceLab store:
+
+```
+codex plugin marketplace add SolanceLab/plugins
+codex plugin add scriptorium@solancelab
+```
+
+Start the server as above, with the key in your shell, and start Codex from that same shell so it can read the key:
+
+```
+export SCRIPTORIUM_MCP_KEY=<a long random key>
+python3 mcp/server.py --root ~/scriptorium
+```
+
+The plugin's connection entry points at `http://127.0.0.1:8795/mcp` and takes the key from `SCRIPTORIUM_MCP_KEY`; the key is never written into a file. If you changed the port, edit `codex.mcp.json` in your Codex plugin folder. Codex asks before the first tool call; the two tools are the ones in the table below.
+
 ## Settings
 
 | Setting | What it is |

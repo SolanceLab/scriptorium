@@ -1,6 +1,6 @@
 {
   "name": "scriptorium",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Scriptorium: turn your chat history into memories you can check, each with its exact words, source lines and real date.",
   "author": {
     "name": "House of Solance",
@@ -8,5 +8,5 @@
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./codex.mcp.json"
 }
