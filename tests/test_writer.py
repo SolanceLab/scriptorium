@@ -332,6 +332,18 @@ class Pieces(unittest.TestCase):
         self.assertEqual([d for d, _ in w.split_pieces(lines, "2023-07-14", tz="Asia/Jakarta")],
                          ["2023-07-14", "2023-07-15"])                                    # two Jakarta days
 
+    def test_short_fractions_of_a_second_parse_on_python_3_9(self):
+        # Postgres trims trailing zeros (.020 -> .02); Python 3.9 and 3.10 fromisoformat only take 3 or 6 digits
+        for s in ("2026-11-16T22:24:42.02+07:00", "2026-11-16T22:24:42.0234+07:00", "2026-11-16T22:24:42.1Z",
+                  "2026-11-16T22:24:42.123456789+07:00"):
+            t = w.parse_iso(s)
+            self.assertEqual((t.hour, t.minute, t.second), (22, 24, 42))
+            self.assertIsNotNone(t.tzinfo)
+        self.assertEqual(w.parse_iso("2026-11-16T22:24:42.02+07:00").microsecond, 20000)
+        self.assertEqual(w.local_day("2026-11-16T22:24:42.02+00:00", "Asia/Jakarta"), "2026-11-17")
+        with self.assertRaises(ValueError):
+            w.parse_iso("not a time")
+
     def test_a_one_piece_conversation_takes_the_day_its_messages_carry(self):
         conv = {"uuid": "x", "name": "x", "created_at": "2023-07-14T10:00:00Z", "chat_messages": [
             {"uuid": "D1:1", "sender": "human", "created_at": "2023-07-15T09:00:00Z", "text": "Hello there friend."}]}

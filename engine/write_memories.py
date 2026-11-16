@@ -79,6 +79,19 @@ def claude_lines(conv):
     return cid, title, out
 
 
+_FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
+
+
+def parse_iso(stamp):
+    """An ISO timestamp as a datetime. Python 3.9 and 3.10 fromisoformat take only 3 or 6 digits after the seconds,
+    but Postgres trims trailing zeros (.020 becomes .02), so the fraction is padded or cut to 6 digits first.
+    Raises ValueError when the text is not a time."""
+    import datetime as dt
+    s = str(stamp or "").replace("Z", "+00:00")
+    s = _FRACTION.sub(lambda m: m.group(1) + "." + (m.group(2) + "000000")[:6], s, count=1)
+    return dt.datetime.fromisoformat(s)
+
+
 def local_day(stamp, tz=None):
     """The calendar day of a timestamp. Without a time zone it is the day as the export writes it (Claude exports
     write UTC); with one (an IANA name such as Asia/Jakarta) the timestamp is moved to that zone first, so a message
@@ -88,7 +101,7 @@ def local_day(stamp, tz=None):
         import datetime as dt
         from zoneinfo import ZoneInfo
         try:
-            t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            t = parse_iso(s)
             if t.tzinfo is None:
                 t = t.replace(tzinfo=dt.timezone.utc)
             return t.astimezone(ZoneInfo(tz)).date().isoformat()

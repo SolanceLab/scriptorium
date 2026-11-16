@@ -92,7 +92,7 @@ def sender_is(names, sender):
 
 def _parse_when(said_at):
     try:
-        d = dt.datetime.fromisoformat(str(said_at).replace("Z", "+00:00"))
+        d = wm.parse_iso(said_at)
     except ValueError:
         return None
     return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
