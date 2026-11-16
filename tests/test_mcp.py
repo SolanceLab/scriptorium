@@ -24,6 +24,16 @@ CONV = [{"uuid": "c1", "name": "3:20 pm on 14 March, 2022", "created_at": "2022-
     {"uuid": "D1:1", "sender": "human", "text": "Priya: I finally signed up for the pottery class."}]}]
 
 
+class Version(unittest.TestCase):
+    def test_server_reports_the_plugin_version_and_manifests_agree(self):
+        versions = []
+        for kind in (".claude-plugin", ".codex-plugin"):
+            with open(os.path.join(HERE, "..", "plugin", kind, "plugin.json"), encoding="utf-8") as f:
+                versions.append(json.load(f)["version"])
+        self.assertEqual(versions[0], versions[1])
+        self.assertEqual(server.SERVER_INFO["version"], versions[0])
+
+
 class Tools(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

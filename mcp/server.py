@@ -25,7 +25,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/.
 MAX_LIMIT = 50
-SERVER_INFO = {"name": "scriptorium", "version": "1.0.0"}
+
+
+def _plugin_version():
+    """The version in plugin/.claude-plugin/plugin.json, so the server reports what is installed."""
+    try:
+        with open(os.path.join(HERE, "..", "plugin", ".claude-plugin", "plugin.json"), encoding="utf-8") as f:
+            return str(json.load(f)["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "0.0.0"    # shortcut: no manifest next to the server (a copied-out file); the number is then unknown
+
+
+SERVER_INFO = {"name": "scriptorium", "version": _plugin_version()}
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 MAX_PIECES_PER_CALL = 100             # model pieces one write_memories call may start (the first conversation completes)

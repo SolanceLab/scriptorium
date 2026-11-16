@@ -47,8 +47,9 @@ def _nfc(s):
 
 
 def _letters(s):
-    """Only the letters of s, lower-cased: 'Ami ✨' -> 'ami'. Accents are kept."""
-    return "".join(c for c in _nfc(s).casefold() if c.isalpha())
+    """Only the letters of s, lower-cased: 'Ami ✨' -> 'ami'. Styled letters fold to plain ones (NFKC:
+    a script-style 'Mira' -> 'mira'). Accents are kept."""
+    return "".join(c for c in unicodedata.normalize("NFKC", s or "").casefold() if c.isalpha())
 
 
 def names_of(card):
@@ -73,9 +74,20 @@ def name_in(names, text):
     return False
 
 
-def sender_is(names, sender):
+def sender_exact(names, sender):
     s = _letters(sender)
     return bool(s) and any(_letters(n) == s for n in names)
+
+
+def sender_leads(names, sender):
+    """True when a name is the sender's leading word(s): sender 'Mira Costa' fits 'Mira', not 'Costa' or 'Mir'."""
+    words = str(sender or "").split()
+    lead = {_letters(" ".join(words[:k])) for k in range(1, len(words))}
+    return any(len(_letters(n)) >= 2 and _letters(n) in lead for n in names)
+
+
+def sender_is(names, sender):
+    return sender_exact(names, sender) or sender_leads(names, sender)
 
 
 def _parse_when(said_at):
@@ -176,6 +188,38 @@ def about_owner(fact, msg, quote, card_name="", owners=()):
     return False
 
 
+def _ids_of(card, key):
+    """The card's account ids under `key` (ids or shared_ids), as stripped strings, empty ones dropped."""
+    vals = card.get(key)
+    if not isinstance(vals, (list, tuple, set)):
+        return set()
+    return {str(x).strip() for x in vals if str(x).strip()}
+
+
+def _by_name(cards, sender):
+    """Card indexes the sender's name fits: an exact name beats a leading word."""
+    hits = [i for i, c in cards if sender_exact(names_of(c), sender)]
+    return hits or [i for i, c in cards if sender_leads(names_of(c), sender)]
+
+
+def _tie_sender(live, m):
+    """(card index, tied by account id) for the message's sender; index None when no one card. An account id comes first: an id owned by one card ties to it;
+    an id several cards speak through (shared_ids) is matched by name among those cards only; an id no card knows ties to no one.
+    Names alone decide only for a message with no id."""
+    sid = str(m.get("sender_id") or "").strip()
+    if sid:
+        personal = [i for i, c in live if sid in _ids_of(c, "ids")]
+        if personal:
+            return (personal[0], True) if len(personal) == 1 else (None, False)
+        via = [(i, c) for i, c in live if sid in _ids_of(c, "shared_ids")]
+        if via:
+            hits = _by_name(via, m.get("sender"))
+            return (hits[0], True) if len(hits) == 1 else (None, False)
+        return (None, False)        # an id no card knows ties to no one: a shown name can be anyone's
+    hits = _by_name(live, m.get("sender"))
+    return (hits[0], False) if len(hits) == 1 else (None, False)
+
+
 def group_messages(cards, messages, owners=(), cap=MAX_PER_PERSON):
     """{card index: [message, ...]} oldest first, newest 60 kept (cap=None keeps all), text cut at 1,500 characters. A name two cards
     share never ties a message to either; a sender ties a message only to the one card the sender's name fits."""
@@ -186,17 +230,19 @@ def group_messages(cards, messages, owners=(), cap=MAX_PER_PERSON):
     sender_owner = {}
     for m in msgs:
         if str(m.get("sender") or "").strip().casefold() in OWNER_SENDERS:   # the export's own speaker: no card's
-            sender_owner[str(m["id"])] = None
+            sender_owner[str(m["id"])] = (None, False)
             continue
-        hits = [i for i, c in live if sender_is(names_of(c), m.get("sender"))]
-        sender_owner[str(m["id"])] = hits[0] if len(hits) == 1 else None
+        sender_owner[str(m["id"])] = _tie_sender(live, m)
     for i, c in live:
         mine = own_names(c, shared)
-        hit = [m for m in msgs if sender_owner[str(m["id"])] == i or name_in(mine, str(m.get("text") or ""))]
+        hit = [m for m in msgs if sender_owner[str(m["id"])][0] == i or name_in(mine, str(m.get("text") or ""))]
         if not hit:
             continue
         hit.sort(key=_when)
-        out[i] = [dict(m, text=str(m.get("text") or "")[:MAX_TEXT]) for m in (hit if cap is None else hit[-cap:])]
+        # id_author: set here only, never taken from the input: this card's own account id wrote the message
+        out[i] = [dict(m, text=str(m.get("text") or "")[:MAX_TEXT],
+                       id_author=sender_owner[str(m["id"])] == (i, True))
+                  for m in (hit if cap is None else hit[-cap:])]
     return out
 
 
@@ -354,7 +400,7 @@ def restates_link(card, fact):
 
 def about_someone_else(names, other_names, msg, sentence, owners=()):
     """True when the quoted sentence names another card, does not name this person, and this person did not write it."""
-    if sender_is(names, msg.get("sender")) or name_in(names, sentence):
+    if msg.get("id_author") is True or sender_is(names, msg.get("sender")) or name_in(names, sentence):
         return False
     mine = {_letters(n) for n in names_of({"name": "", "aka": names})}
     others = [n for n in list(other_names) + [" ".join(t) for t in _owner_tokens(owners)] if _letters(n) not in mine]
@@ -377,7 +423,7 @@ def check_fact(card, by_id, item, names=None, other_names=(), owners=()):
         return None, None, "the quote is not word for word in the message"
     sentence = sentence_of(msg["text"], quote)
     names = names if names is not None else names_of(card)
-    if not (name_in(names, msg["text"]) or sender_is(names, msg.get("sender"))):
+    if not (name_in(names, msg["text"]) or msg.get("id_author") is True or sender_is(names, msg.get("sender"))):
         return None, None, "the person is not named in the message and did not write it"
     if about_someone_else(names, other_names, msg, sentence, owners):
         return None, None, "the quoted sentence is about someone else"
@@ -418,8 +464,8 @@ def roster_others(cards, i, owners=()):
     return out
 
 
-def find(cards, messages, model_cmd, timeout=600, only=None, limit_people=None, owners=()):
-    with open(PROMPT_FILE, encoding="utf-8") as f:
+def find(cards, messages, model_cmd, timeout=600, only=None, limit_people=None, owners=(), prompt_path=None):
+    with open(prompt_path or PROMPT_FILE, encoding="utf-8") as f:
         template = f.read()
     only_l = {str(o).casefold() for o in (only or [])}
     res = {"people_seen": 0, "facts": [], "field_suggestions": [], "rejected": [], "errors": []}
@@ -488,6 +534,7 @@ def main(argv=None):
     ap.add_argument("--owner", action="append", default=[], metavar="NAME",
                     help="a person who owns this record (repeatable; also SCRIPTORIUM_OWNERS, comma-separated)")
     ap.add_argument("--limit-people", type=int, default=None, help="at most N people go to the model")
+    ap.add_argument("--prompt", default=None, help="a prompt file of your own (default prompt-found.md)")
     a = ap.parse_args(argv)
     with open(a.messages, encoding="utf-8") as f:
         messages = json.load(f)
@@ -498,7 +545,7 @@ def main(argv=None):
         return 2
     model_cmd = a.model_cmd or MODEL_CMD_TEMPLATE.format(model=wm.shlex.quote(a.model))
     owners = owners_from(a.owner, owners_env())
-    res = find(cards, messages, model_cmd, a.timeout, a.only, a.limit_people, owners)
+    res = find(cards, messages, model_cmd, a.timeout, a.only, a.limit_people, owners, a.prompt)
     doc = {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
            "model": "custom command" if a.model_cmd else a.model, "people_seen": res["people_seen"],
            "facts": res["facts"], "field_suggestions": res["field_suggestions"], "rejected": res["rejected"],

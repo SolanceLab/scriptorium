@@ -67,6 +67,32 @@ class Matching(unittest.TestCase):
         self.assertEqual(len(self.names(card("Nathaniel"), "hello", sender="nathaniel \u2728")), 1)
         self.assertEqual(self.names(card("Nathaniel"), "hello", sender="Someone"), {})
 
+    def test_styled_letters_fit_a_plain_card(self):
+        self.assertEqual(len(self.names(card("Mira"), "hello", sender="\U0001d4dc\U0001d4f2\U0001d4fb\U0001d4ea")), 1)
+
+    def test_full_display_name_fits_first_name_card(self):
+        self.assertEqual(len(self.names(card("Mira"), "hello", sender="Mira Costa")), 1)
+        self.assertEqual(len(self.names(card("Mira"), "hello", sender="mira \u00e9lan costa")), 1)
+
+    def test_sender_word_boundary_and_leading_words_only(self):
+        self.assertEqual(self.names(card("Mira"), "hello", sender="Miranda"), {})
+        self.assertEqual(self.names(card("Mira"), "hello", sender="Miranda Costa"), {})
+        self.assertEqual(self.names(card("Costa"), "hello", sender="Mira Costa"), {})
+        self.assertEqual(self.names(card("Mira Costa"), "hello", sender="Mira"), {})
+
+    def test_exact_name_beats_leading_word(self):
+        got = fc.group_messages([card("Mira"), card("Mira Costa")], [msg(1, "hello", "Mira Costa")], OWNERS)
+        self.assertEqual(list(got), [1])
+
+    def test_two_leading_word_cards_do_not_tie(self):
+        got = fc.group_messages([card("Mira"), card("Mira", id="p-2")], [msg(1, "hello", "Mira Costa")], OWNERS)
+        self.assertEqual(got, {})
+
+    def test_own_messages_land_in_their_group(self):
+        msgs = [msg(1, "I cook every day", "\U0001d4dc\U0001d4f2\U0001d4fb\U0001d4ea Costa"), msg(2, "hi", "Ona")]
+        got = fc.group_messages([card("Mira")], msgs, OWNERS)
+        self.assertEqual([m["id"] for m in got[0]], ["1"])
+
     def test_cap_keeps_newest(self):
         msgs = [msg(i, "Nate here", said_at="2026-%02d-%02dT10:00:00+00:00" % (1 + i // 28, 1 + i % 28))
                 for i in range(70)]
@@ -381,6 +407,74 @@ class Review(unittest.TestCase):
         self.assertEqual(len(r["facts"]), 2)
 
 
+class AccountIds(unittest.TestCase):
+    def tie(self, cards, **kw):
+        m = msg(1, "hello there", **{k: v for k, v in kw.items() if k == "sender"})
+        if "sender_id" in kw:
+            m["sender_id"] = kw["sender_id"]
+        return fc.group_messages(cards, [m], OWNERS)
+
+    def test_personal_id_ties_when_name_matches_nothing(self):
+        r = self.tie([card("Mira", ids=["u1"]), card("Jon")], sender="Zed", sender_id="u1")
+        self.assertEqual(list(r), [0])
+
+    def test_personal_id_beats_a_different_name(self):
+        r = self.tie([card("Mira", ids=["u1"]), card("Jon")], sender="Jon", sender_id=" u1 ")
+        self.assertEqual(list(r), [0])
+
+    def test_two_cards_one_personal_id_no_tie_and_no_name_fallthrough(self):
+        r = self.tie([card("Mira", ids=["u1"]), card("Jon", ids=["u1"])], sender="Jon", sender_id="u1")
+        self.assertEqual(r, {})
+
+    def test_shared_id_picks_by_name_among_its_cards(self):
+        cards = [card("Mira", shared_ids=["bot9"]), card("Jon", shared_ids=["bot9"]), card("Pax")]
+        self.assertEqual(list(self.tie(cards, sender="Jon", sender_id="bot9")), [1])
+
+    def test_shared_id_with_name_not_on_its_cards_no_tie(self):
+        cards = [card("Mira", shared_ids=["bot9"]), card("Jon", shared_ids=["bot9"]), card("Pax")]
+        self.assertEqual(self.tie(cards, sender="Pax", sender_id="bot9"), {})
+
+    def test_shared_id_two_cards_same_name_no_tie(self):
+        cards = [card("Mira", shared_ids=["bot9"]), card("Mira", shared_ids=["bot9"])]
+        cards[1]["id"] = "p-Mira2"
+        self.assertEqual(self.tie(cards, sender="Mira", sender_id="bot9"), {})
+
+    def test_unknown_id_ties_to_no_one(self):
+        # a stranger who takes the name "Jon" must not have their words saved onto Jon's card
+        r = self.tie([card("Mira", ids=["u1"]), card("Jon")], sender="Jon", sender_id="u77")
+        self.assertEqual(r, {})
+
+    def test_no_sender_id_is_unchanged(self):
+        r = self.tie([card("Mira", ids=["u1"]), card("Jon")], sender="Jon")
+        self.assertEqual(list(r), [1])
+
+    def test_id_tied_sender_with_other_name_gets_facts_through(self):
+        m = msg(1, "I am a cook in Bali", sender="Zed")
+        m["sender_id"] = "u1"
+        cards = [card("Mira", ids=["u1"]), card("Jon")]
+        r = run(cards, [m], [{"fact": "Is a cook in Bali.", "quote": "I am a cook in Bali", "message_id": "1"}])
+        self.assertEqual([f["name"] for f in r["facts"]], ["Mira"], r["rejected"])
+
+    def test_id_author_cannot_be_forged_in_input(self):
+        m = msg(1, "I am a cook in Bali", sender="Zed")
+        m["id_author"] = True
+        r = run([card("Mira")], [m], [{"fact": "Is a cook.", "quote": "I am a cook", "message_id": "1"}])
+        self.assertEqual(r["facts"], [])
+
+    def test_ids_never_reach_the_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            seen = os.path.join(tmp, "seen.txt")
+            body = "import sys\nopen(%r, 'w').write(sys.stdin.read())\nprint('{\"facts\": []}')\n" % seen
+            m = msg(1, "Mira is a cook", sender="Zed")
+            m["sender_id"] = "SECRETID1"
+            fc.find([card("Mira", ids=["SECRETID1"], shared_ids=["SHAREDID2"])], [m], fake(tmp, body))
+            with open(seen, encoding="utf-8") as f:
+                text = f.read()
+        self.assertIn("Mira", text)
+        self.assertNotIn("SECRETID1", text)
+        self.assertNotIn("SHAREDID2", text)
+
+
 class Run(unittest.TestCase):
     def test_failed_call_goes_to_errors_and_run_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -392,6 +486,17 @@ class Run(unittest.TestCase):
         self.assertEqual(len(r["errors"]), 1)
         self.assertEqual(r["errors"][0]["name"], "Bob")
         self.assertEqual([f["name"] for f in r["facts"]], ["Cy"])
+
+    def test_own_prompt_file_is_the_one_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = os.path.join(tmp, "mine.md")
+            with open(pf, "w", encoding="utf-8") as f:
+                f.write("MARKER-XYZ {name}\n")
+            seen = os.path.join(tmp, "seen.txt")
+            body = "import sys\nopen(%r, 'w').write(sys.stdin.read())\nprint('{\"facts\": []}')\n" % seen
+            fc.find([card("Bob")], [msg(1, "Bob is a cook")], fake(tmp, body), prompt_path=pf)
+            with open(seen, encoding="utf-8") as f:
+                self.assertIn("MARKER-XYZ", f.read())
 
     def test_cli_writes_output_and_only(self):
         with tempfile.TemporaryDirectory() as tmp:

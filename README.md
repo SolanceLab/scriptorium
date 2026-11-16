@@ -2,63 +2,53 @@
 
 Made by House of Solance · free for noncommercial use · credit required
 
-The room where the record is written: your chats become memories, and your people roster fills itself. Its pair, [Antechamber](https://github.com/SolanceLab/antechamber), is the room where it is found again.
+Scriptorium turns your chats into memories you can check, and keeps a page for every person in them.
+
+<div align="center">
+
+📜
+
+*Imagine your AI keeps a journal. Some of it, it writes by hand: the moments it chose to remember. But most of what happens is talk, thousands of lines a day, and no one can copy all of it down.*
+
+*So things slip. Someone mentions they moved, a birthday, a new job, once and in passing. A week later it's gone.*
+
+**Scriptorium is the assistant at the writer's elbow.** *When the day goes quiet, it reads back the talk and drafts what matters: each memory in the speaker's own words, with the line it came from and the real date, and a page for every person, holding only what they said themselves.*
+
+*The writer keeps the pen. The assistant copies, it never invents. Anything it can't point to a line for, it sets aside to be checked.*
+
+</div>
+
+<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your chats go in on the left. Inside Scriptorium a model you choose drafts from them, then plain code checks every quote against its line, and three things come out: memories, each with the speaker's exact words, its source line and the real date; a page for every person, with only what they said themselves; and a tray of anything it could not prove, set aside for you to check. Below, its pair Antechamber makes all of it findable: your AI asks where Mira lives now and gets back the one right memory, with its line and date. Without them, you would search thousands of lines yourself."></p>
+
+Its pair, [Antechamber](https://github.com/SolanceLab/antechamber), is the librarian who finds it all again.
+
+## Quick start
+
+```
+git clone https://github.com/SolanceLab/scriptorium && cd scriptorium
+SCRIPTORIUM_MCP_KEY=<a long random key> python3 mcp/server.py --root ~/scriptorium
+```
+
+In a second terminal, add the plugin; it asks for the server address and the key:
+
+```
+claude plugin marketplace add SolanceLab/plugins
+claude plugin install scriptorium@solancelab
+```
+
+Put your `conversations.json` in `~/scriptorium`, then ask your AI to write memories from it. In Codex: [docs/codex.md](docs/codex.md).
 
 ## What it is
 
-Scriptorium turns your chat history into memories you can check. Each memory keeps the speaker's exact words, the lines they came from and the real date, and a second pass gathers everything about each recurring person onto one card.
+Scriptorium writes the record your AI can trust: memories from your chat history, each one checked word for word against the lines it came from, and one card for every person who keeps coming up. Every night it can also read your new messages and add what people said about themselves to their cards. It is made for conversations, the people and moments in them, not for coding sessions.
 
 ## What you need
 
 - Python 3.9 or newer (standard library only).
-- A Claude-format chat export (`conversations.json`, from Claude's data export, or any tool that writes the same shape).
-- A model to write with. By default it uses Claude Code (`claude` on your PATH, signed in), with every tool switched off. You can point it at any other model instead (see How it works).
+- A Claude-format chat export (`conversations.json`), or your own store ([docs/your-own-store.md](docs/your-own-store.md)).
+- A model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
 
 Everything runs on your own computer. Your conversations go only to the model you choose.
-
-## Install
-
-This repo is its own plugin marketplace:
-
-```
-claude plugin marketplace add SolanceLab/scriptorium
-claude plugin install scriptorium@scriptorium
-```
-
-Once the presence-app set launches, you will also be able to install it there with `claude plugin install scriptorium@presence-app`.
-
-Then start the server on your own computer, with a key and the one folder it may read and write:
-
-```
-SCRIPTORIUM_MCP_KEY=<a long random key> python3 mcp/server.py --root ~/scriptorium
-```
-
-Put your `conversations.json` inside that folder.
-
-## Use in Codex
-
-Scriptorium installs in Codex too, from the SolanceLab store:
-
-```
-codex plugin marketplace add SolanceLab/plugins
-codex plugin add scriptorium@solancelab
-```
-
-Use two terminals, and set the key in both. In the first, start the server (the prompt keeps the key out of your shell history):
-
-```
-read -rs SCRIPTORIUM_MCP_KEY && export SCRIPTORIUM_MCP_KEY
-python3 mcp/server.py --root ~/scriptorium
-```
-
-In the second, enter the same key the same way, then start Codex from that terminal so it can read the key:
-
-```
-read -rs SCRIPTORIUM_MCP_KEY && export SCRIPTORIUM_MCP_KEY
-codex
-```
-
-The plugin's connection entry points at `http://127.0.0.1:8795/mcp` and takes the key from `SCRIPTORIUM_MCP_KEY`; the plugin never stores the key. If you changed the port, edit `codex.mcp.json` in your Codex plugin folder. Codex asks before the first tool call; the two tools are the ones in the table below.
 
 ## Settings
 
@@ -71,77 +61,27 @@ The plugin's connection entry points at `http://127.0.0.1:8795/mcp` and takes th
 
 | Tool | What it does |
 |---|---|
-| `write_memories` | Writes memories from a chat export: one file per conversation. Finished conversations are skipped, so call it again to continue a long export. |
-| `write_people` | Joins the memories of one person's many conversations into one card per recurring person, with source lines; a card never states a date its memories don't back. Names that differ only in capitals, spacing or punctuation ("Jean-Luc", "Jean Luc") are one person. |
+| `write_memories` | Writes memories from a chat export, one file per conversation. Call it again to continue a long export. |
+| `write_people` | Gathers one person's memories into one card, with source lines. "Jean-Luc" and "Jean Luc" are one person. |
 
-You can also run both writers directly, without the plugin:
-
-```
-python3 engine/write_memories.py --export conversations.json --out memories --model claude-sonnet-5-5
-python3 engine/write_people.py --export conversations.json --memories memories --out people --model claude-sonnet-5-5
-```
-
-## The roster fills itself (optional, nightly)
-
-Once you have people cards, a nightly run can read the messages that are new since the last run and note what they say about each person: short facts, each with the exact words and the message it came from, plus values for a card's fixed fields (birthday, place, work and so on). Every fact and value is checked in code against the real message before it is kept.
-
-```
-python3 engine/nightly.py --export conversations.json --cards people --out found --owner "Your Name" --model claude-sonnet-5-5
-python3 engine/review.py --out found list
-python3 engine/review.py --out found --cards people accept 3
-python3 engine/review.py --out found dismiss 4
-python3 engine/review.py --out found remove-fact nate 2
-```
-
-- `nightly.py` runs the model per person the new messages mention (once for each 60 of their messages, so a long backlog is read in full). The first run has no cursor and reads every message; after that it reads only what is newer than `found/cursor.json`. A message with no readable time is counted and reported ("N messages had no time and were not read"); the run then exits non-zero and the cursor stays where it was. The cursor moves only when the run finished with no person failing, so a failed night is simply read again next time. A lock stops two runs from overlapping. A fact's day is the message timestamp's own calendar date (UTC for Claude exports); `--timezone` (or `MEMORY_WRITER_TZ`) converts it to your zone first. Run it by hand, or schedule it: `examples/cron.example` and `examples/launchd.plist.example` run it at 03:30.
-- Facts land by themselves in `found/facts/<person>.json`, each beside its quote. Nothing waits for you. To remove a fact, delete its `{...}` object from the list in `facts/<person>.json` (or run `review.py --out found remove-fact KEY N`, N counting from 1).
-- Field values wait in `found/suggestions.json` until you decide: `review.py list` shows them numbered, `accept N` keeps the value in `found/fields/<person>.json` (your card files are not touched, so rewriting the cards never loses it, and the nightly run counts it as known), `dismiss N` drops it for good.
-- Owner names are a setting: `--owner NAME` (repeatable) or `SCRIPTORIUM_OWNERS="Name, Other Name"`. They are the people who own this record. Their own cards are skipped, and a fact about them is rejected. With none named, every person on the roster is treated alike.
-- A person's card only reads messages newer than the cursor, so a card made today does not look back at old messages unless you delete `found/cursor.json`; facts already found are not repeated.
-
-## See your roster (optional)
-
-A People page shows your cards, the facts found in your chats and the suggestions waiting for you, on your own computer (Node 18 or newer; `npm install` runs once).
-
-```
-make people-page CARDS=people OUT=found
-```
-
-Then open http://127.0.0.1:8788/. It reads your card files and the `found` folder, and Accept, Dismiss, Edit and Remove on facts run `review.py` for you. Adding or editing a person happens in your card files. The page answers on this computer only.
-
-![People page](docs/people.png)
-(sample people)
-
-## Updates
-
-Third-party marketplaces do not auto-update by default. To turn it on once: `/plugin` > Marketplaces > `scriptorium` > Enable auto-update. To update by hand: `claude plugin update scriptorium@scriptorium`, then restart. The writers and the server update with `git pull`.
-
-On each new session the plugin makes one request for its public version file (`plugin/.claude-plugin/plugin.json` on GitHub), at most once a day (once an hour while the request fails), and shows one line when a newer version is out. It sends nothing about you. To switch the check off, set `PLUGIN_UPDATE_CHECK=0`.
+The nightly roster, the People page and running everything by hand: [docs/roster.md](docs/roster.md).
 
 ## Limits
 
-- The server answers only on 127.0.0.1, refuses to start without a key of at least 16 characters, and is given paths only inside its one folder (not your home folder); linked files inside that folder are not followed when reading memories. It trusts that folder: another program that can already write there could redirect a write, so keep it a folder only you use.
-- Requests must be JSON, from a local address, at most 1 MB; exports are at most 200 MB.
-- One write runs at a time; other requests are still answered. `write_memories` writes at most 50 conversations per call (default 10) and starts at most 100 model pieces per call (the first conversation of a call always completes); call it again to continue where it stopped. A conversation that would need more than 200 pieces is refused before any model call.
-- A conversation is split into pieces: one per calendar day it runs over, and a day longer than about 100,000 tokens is cut again. Each piece is one model call with its own date. Days are read from each message's timestamp as the export writes it (Claude exports use UTC) unless you give your time zone (`--timezone Asia/Jakarta`, the tool's `timezone`, or `SCRIPTORIUM_TZ` for the server); then days and "yesterday" follow your clock. A single message longer than one model call can read fails and is reported.
-- Each memory model call may take up to 10 minutes; a failed call is retried once, and a date error gets one corrective retry. A person-card call may take up to 15 minutes and is retried once.
-- A memory's summary is at most 1,500 characters; it keeps at most 10 emotions and 10 context tags, each at most 60 characters.
-- Relative dates ("last Friday") are read off a calendar of the 14 days before and 7 days after each conversation.
-- A person gets a card only when they appear in at least 2 sessions and at least 3 memories. A session is one conversation on one day: two chats on the same day count as two, and so do two days of one long chat.
-- Cost: about 2 to 5 US cents per conversation for memories and about 8 to 13 cents per person-card pass, measured with Claude Sonnet.
+- A person gets a card after at least 2 sessions and 3 memories.
+- `write_memories` writes at most 50 conversations per call; the nightly roster reads at most 60 messages per person per run, and the rest wait.
+- About 2 to 5 US cents per conversation and 8 to 13 cents per person card, with Claude Sonnet.
+- The server answers only on this computer, inside one folder you choose.
+
+Every limit, with its number: [docs/limits.md](docs/limits.md).
 
 ## How it works
 
-1. **Memories.** The writer hands one conversation (or one day of a long one) at a time to the model with the instructions in `engine/prompt-public.md`. The model proposes memories: topic, summary, the exact words (excerpt), the source line ids, the date, and three labels: **salience** (how much the moment changed things), **valence** (heavy to light) and **emotions**.
-2. **Checked before kept.** Every proposed memory is checked against the real lines: the line ids must exist in that conversation, and every piece of the excerpt must appear word for word in one line it cites. A date that is hedged ("likely 7 July"), a weekday that does not match its date, or "last Friday" turned into the wrong Friday is rejected. A memory that fails is reported, never kept.
-3. **People cards.** `write_people` reads all of one person's memories at once. The model names the memories each fact rests on; the code assembles the exact words and line ids from those memories, so a quote can never be paraphrased. Code, not the model, decides who gets a card.
-4. **Provenance.** Every output file records the exact model command, the model that answered, its cost, the writer's version and the fingerprint of the instructions used.
+The model proposes; the code checks. A memory is kept only if every word of its quote appears in the line it cites and its date holds up. Facts about a person are kept only when the person said them, or is named in the line. Anything that fails is reported or set aside, never kept quietly. More: [docs/how-it-works.md](docs/how-it-works.md).
 
-**Any model.** `--model-cmd "<command>"` (or `SCRIPTORIUM_MODEL_CMD` for the server) runs any command that reads the instructions on its input and prints its answer, so you can use another provider or a local model. The default Claude command has every tool switched off; a command of your own gets only the protections you give it.
+## What's coming next
 
-**Under development.** Salience, valence and emotions are written on every memory today. Using salience and valence to rank recall, letting unasked memories fade (grief faster than joy) and strengthen when used, and marking an older memory as replaced by a newer one are under development. Emotions are shown with a memory, never used to search for one.
-
-Memory files work as a store for [Antechamber](https://github.com/SolanceLab), House of Solance's recall engine, which shows each memory with its source lines.
+Today Scriptorium is the assistant. Next it becomes the pen as well: a journal your AI writes into itself, a core it keeps in versions as it grows, and a spine for the moments that changed it. The assistant drafts from your chats; the pen is what lets your AI build up a self across time.
 
 ## Credit and use
 
