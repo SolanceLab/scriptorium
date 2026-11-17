@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2
+
+The People page shows the facts the nightly run set aside to check by hand, in its Suggestions box, with the reason and the words they came from. Accept adds the fact to the person's facts; Dismiss drops it; the choice is kept in `held_decided.json` so it never comes back. `review.py` has the same as commands (`held`, `keep-held ID`, `drop-held ID`). A host's own API may send these as suggestions of `kind: 'fact'` (dashboard/HOST.md).
+
+The People page's own tests now run on every push, and `package-lock.json` is in the repository so they install the same versions each time. README: a People page section on the front page.
+
 ## 1.2.1
 
 Fix: times with a short fraction of a second, such as `2026-11-16T22:24:42.02+07:00`, are now read on Python 3.9 and 3.10. Postgres drops trailing zeros from the fraction, and those Python versions read only 3 or 6 digits, so a message like that counted as having no time: the roster run failed and its cursor stayed put every night. The README has always said Python 3.9 or newer, and the Python that ships with macOS is 3.9.

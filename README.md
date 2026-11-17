@@ -66,6 +66,12 @@ Everything runs on your own computer. Your conversations go only to the model yo
 
 The nightly roster, the People page and running everything by hand: [docs/roster.md](docs/roster.md).
 
+## People page
+
+Your people, one card each, in your browser. What the nightly run found waits under Suggestions: a value for a card's field, or a fact it could not prove by itself and set aside for you to check by hand, with the reason and the words it came from. Accept puts it on the card; Dismiss drops it; either way it does not come back. Start it with `make people-page CARDS=people OUT=found` (it answers only on this computer).
+
+<p align="center"><img src="docs/people-page.png" width="800" alt="The People page. Under Suggestions, for a person named Alma: a place, Lisbon, from the words 'Alma moved to Lisbon'; and a fact set aside to check by hand, 'Used to live in Porto', with the reason (the sentence is in the past) and the words it came from. Each has an Accept and a Dismiss button."></p>
+
 ## Limits
 
 - A person gets a card after at least 2 sessions and 3 memories.

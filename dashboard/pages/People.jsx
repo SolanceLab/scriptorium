@@ -104,7 +104,7 @@ function ConnectionChip({ c }) {
 
 // "Found in chats": facts the nightly reader found in the owner's chats, straight onto the card with an edit button
 // (DECISIONS found-in-chats-shape). Loaded only when opened, so the page doesn't ask for every card at once.
-function FoundInChats({ personId }) {
+function FoundInChats({ personId, version = 0 }) {
   const { adapter } = useHost()
   const [open, setOpen] = useState(false)
   const [facts, setFacts] = useState(null)
@@ -121,6 +121,8 @@ function FoundInChats({ personId }) {
       if (!isAuth(err)) setError(err.message || 'Could not load')
     }
   }
+  // A fact accepted from Suggestions bumps `version`: an open panel reloads so the new fact shows.
+  useEffect(() => { if (version > 0 && facts !== null) load() }, [version])
   const toggle = () => { const o = !open; setOpen(o); if (o && facts === null) load() }
   const save = async (id, body) => {
     setBusy(id); setError(null)
@@ -180,7 +182,7 @@ function FoundInChats({ personId }) {
   )
 }
 
-function PersonCard({ person, incoming = 0, onEdit, onDelete, deleting, canEdit = true }) {
+function PersonCard({ person, factsVersion = 0, incoming = 0, onEdit, onDelete, deleting, canEdit = true }) {
   const [open, setOpen] = useState(false)
   // Two steps on purpose. There is no red in the house palette, so the guard
   // against a mis-tap is a second deliberate press, not a colour.
@@ -351,7 +353,7 @@ function PersonCard({ person, incoming = 0, onEdit, onDelete, deleting, canEdit 
         </div>
       )}
 
-      <FoundInChats personId={person.id} />
+      <FoundInChats personId={person.id} version={factsVersion} />
 
       {/* Confirm strip — names the person and what goes with them */}
       {confirming && (
@@ -747,6 +749,7 @@ const FIELD_LABELS = {
 
 function suggestionValue(s) {
   const v = s.value
+  if (s.kind === 'fact') return v && typeof v === 'object' ? String(v.fact || '') : String(v ?? '')
   if (s.field === 'birthday') return birthdayLabel(v)
   if (s.field === 'dates' && v && typeof v === 'object') return `${v.label} · ${v.date}`
   if (s.field === 'accounts' && v && typeof v === 'object') return `${v.handle} · ${v.platform}`
@@ -770,7 +773,7 @@ function Suggestions({ items, onDecide, busyId }) {
         <span className="ml-auto text-[color:var(--page-faint)]">{open ? '▾' : '▸'}</span>
       </button>
       {open && <p className="text-sm text-[color:var(--page-dim)] font-[Söhne,sans-serif] -mt-2">
-        Found in notes and chats. Accept moves it into its field; nothing changes until you do.
+        Found in notes and chats. Accept moves a field into the card, or a fact into the person's facts; nothing changes until you do.
       </p>}
       {open && byPerson.map(g => (
         <div key={g.id} className="space-y-2 pt-3 border-t border-[color:var(--rule-dim)]">
@@ -779,10 +782,11 @@ function Suggestions({ items, onDecide, busyId }) {
             <div key={s.id} className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4">
               <div className="min-w-0 flex-1">
                 <div className="text-[15px] font-[Söhne,sans-serif] text-[color:var(--page)] break-words">
-                  <span className={labelClasses + ' mr-2'}>{FIELD_LABELS[s.field] || s.field}</span>
+                  <span className={labelClasses + ' mr-2'}>{s.kind === 'fact' ? 'Check by hand' : (FIELD_LABELS[s.field] || s.field)}</span>
                   {suggestionValue(s)}
                   {s.inferred && <span className="ml-2 text-xs text-[color:var(--page-faint)]">(inferred from the place)</span>}
                 </div>
+                {s.kind === 'fact' && s.value?.why && <p className="text-sm text-[color:var(--page-muted)] font-[Söhne,sans-serif] mt-0.5 break-words">{s.value.why}</p>}
                 {s.quote && <p className="text-sm text-[color:var(--page-muted)] font-[Söhne,sans-serif] mt-0.5 break-words">“{s.quote}”</p>}
               </div>
               <div className="flex gap-2 shrink-0">
@@ -829,6 +833,7 @@ export default function People() {
 
   const [suggestions, setSuggestions] = useState([])
   const [decidingId, setDecidingId] = useState(null)
+  const [factsVersion, setFactsVersion] = useState(0)
   // Bumped on every load and every decision, so a slow suggestions response
   // cannot bring back a suggestion decided in the meantime.
   const suggestionsGen = useRef(0)
@@ -846,6 +851,7 @@ export default function People() {
       suggestionsGen.current++
       setSuggestions(list => list.filter(x => x.id !== s.id))
       if (action === 'accept') {
+        if (s.kind === 'fact') setFactsVersion(v => v + 1)
         const gen = ++peopleGen.current
         const data = await adapter.listPeople()
         if (gen === peopleGen.current) setPeople(data.people || [])
@@ -1104,6 +1110,7 @@ export default function People() {
               <PersonCard
                 key={person.id}
                 person={person}
+                factsVersion={factsVersion}
                 incoming={incomingCount[person.id] || 0}
                 onEdit={(p) => setEditingId(p.id)}
                 onDelete={removePerson}

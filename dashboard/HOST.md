@@ -41,6 +41,8 @@ A host whose adapter cannot edit cards says so, and the page hides what would fa
 | `editCards` | no "+ Add person", no Edit or Remove on a card (the adapter's `createPerson`, `updatePerson`, `deletePerson` are never called; they must still exist and may throw) |
 | `links` | the adapter's `addLink`, `removeLink` are never called; cards still show the relations they carry |
 
+A suggestion may also have `kind: 'fact'` and `value: { fact, why }` (a fact the nightly run set aside for the owner to check, shown as "Check by hand"). `accept` puts the fact on the person; how is up to the host's own API. Without `kind`, a suggestion is a card field, as before.
+
 Facts and suggestions (listing, accepting, editing, removing) are not affected.
 
 ## labels (optional)

@@ -6,6 +6,9 @@
     python3 review.py --out found dismiss N
     python3 review.py --out found remove-fact KEY N
     python3 review.py --out found edit-fact KEY N "new text"
+    python3 review.py --out found held
+    python3 review.py --out found keep-held ID
+    python3 review.py --out found drop-held ID
     (remove-fact and edit-fact take --expect FINGERPRINT before the action: refused if fact N is no longer that fact)
 
 `list` prints the pending suggestions, each with its number, the person, the value and the exact words it rests on.
@@ -13,6 +16,9 @@
 exist) and marks the suggestion accepted. `dismiss N` marks it dismissed (it is not suggested again). Facts need no
 review: they sit in facts/<key>.json; `remove-fact KEY N` deletes the Nth fact (counting from 1) of that person; `edit-fact KEY N TEXT` replaces
 its text and marks it edited (its quote and source stay).
+`held` prints (as JSON) the facts the nightly run set aside as "check by hand" (rejected.jsonl) that you have not decided
+on. `keep-held ID` adds one to the person's facts, `drop-held ID` forgets it; either way it is remembered in
+OUT/held_decided.json and never listed again.
 """
 import argparse
 import json
@@ -139,6 +145,91 @@ def edit_fact(out, key, n, text, expect=None):
     wm.write_atomic(path, facts)
 
 
+def held_id(item):
+    """A short id for a set-aside fact: the same person, words and message always give the same id."""
+    import hashlib
+    raw = "\0".join([str(item.get("person_id")), str(item.get("fact")), str(item.get("message_id") or "")])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _held_items(out):
+    """Every set-aside fact in OUT/rejected.jsonl (one per id): the engine turned it away with "check by hand"."""
+    found = {}
+    try:
+        with open(os.path.join(out, "rejected.jsonl"), encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return found
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        item = r.get("item") if isinstance(r, dict) else None
+        if not (isinstance(r, dict) and r.get("source") == "engine" and isinstance(r.get("reason"), str)
+                and "check by hand" in r["reason"] and isinstance(item, dict)):
+            continue
+        fact = item.get("fact")
+        if not (isinstance(fact, str) and fact.strip() and item.get("person_id") not in (None, "")):
+            continue
+        found.setdefault(held_id(item), (r, item))
+    return found
+
+
+def _decided(out):
+    try:
+        with open(os.path.join(out, "held_decided.json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        return {}
+    if not isinstance(d, dict):
+        raise ValueError("%s is not an object" % os.path.join(out, "held_decided.json"))
+    return d
+
+
+def held_list(out):
+    done = _decided(out)
+    res = []
+    for hid, (r, item) in _held_items(out).items():
+        if hid in done:
+            continue
+        res.append({"id": hid, "person_id": str(item["person_id"]), "person_name": item.get("name") or "",
+                    "fact": item["fact"], "why": item.get("why") or r.get("reason"), "quote": item.get("quote") or "",
+                    "message_id": item.get("message_id"), "at": r.get("at")})
+    return res
+
+
+def decide_held(out, hid, keep):
+    held = _held_items(out)
+    if hid not in held:
+        raise ValueError("no set-aside fact %s" % hid)
+    done = _decided(out)
+    if hid in done:
+        raise ValueError("set-aside fact %s is already %s" % (hid, done[hid]))
+    r, item = held[hid]
+    if keep:
+        key = safe_key(str(item["person_id"]))
+        path = os.path.join(out, "facts", key + ".json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                facts = json.load(f)
+        except FileNotFoundError:
+            facts = []
+        if not isinstance(facts, list):
+            raise ValueError("%s is not a list" % path)
+        new = {"fact": " ".join(item["fact"].split()), "quote": item.get("quote") or "", "source": "chat"}
+        if item.get("message_id") not in (None, ""):
+            new["message_ids"] = [item["message_id"]]
+        # No said_on: the set-aside item does not carry the message date, and r["at"] is only when it was set aside.
+        if nightly._key_fact(dict(new, person_id=item["person_id"])) not in {
+                nightly._key_fact(dict(h, person_id=item["person_id"])) for h in facts if isinstance(h, dict)}:
+            facts.append(new)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            wm.write_atomic(path, facts)
+    done[hid] = "kept" if keep else "dropped"
+    wm.write_atomic(os.path.join(out, "held_decided.json"), done)
+
+
 class Busy(Exception):
     pass
 
@@ -191,7 +282,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="the nightly run's folder")
     ap.add_argument("--cards", default=None, help="the folder of person cards (needed for accept)")
     ap.add_argument("--expect", default=None, help="for remove-fact and edit-fact: the fact's fingerprint; a different fact at that number is refused")
-    ap.add_argument("action", choices=["list", "accept", "dismiss", "remove-fact", "edit-fact"])
+    ap.add_argument("action", choices=["list", "accept", "dismiss", "remove-fact", "edit-fact", "held", "keep-held", "drop-held"])
     ap.add_argument("rest", nargs="*", help="N for accept and dismiss; KEY N for remove-fact; KEY N TEXT for edit-fact")
     a = ap.parse_args(argv)
     a.number = a.key = a.text = None
@@ -202,18 +293,20 @@ def main(argv=None):
             a.number = int(a.rest[0])
         elif a.action == "remove-fact" and len(a.rest) == 2:
             a.key, a.number = a.rest[0], int(a.rest[1])
-        elif a.action == "list" and not a.rest:
+        elif a.action in ("list", "held") and not a.rest:
             pass
+        elif a.action in ("keep-held", "drop-held") and len(a.rest) == 1:
+            a.key = a.rest[0]
         elif a.action == "edit-fact" and len(a.rest) == 3:
             a.key, a.number, a.text = a.rest[0], int(a.rest[1]), a.rest[2]
         else:
             raise ValueError
     except ValueError:
-        ap.error("%s needs %s" % (a.action, "KEY N TEXT" if a.action == "edit-fact" else "KEY N" if a.action == "remove-fact" else "a number" if a.action != "list" else "nothing more"))
+        ap.error("%s needs %s" % (a.action, "KEY N TEXT" if a.action == "edit-fact" else "KEY N" if a.action == "remove-fact" else "an id" if a.action.endswith("-held") else "a number" if a.action not in ("list", "held") else "nothing more"))
     if a.action == "accept" and not a.cards:
         ap.error("accept needs --cards (the folder of person cards)")
     try:
-        if a.action == "list":
+        if a.action in ("list", "held"):
             return act(a)
         with RunLock(a.out, LOCK_WAIT):
             return act(a)
@@ -226,6 +319,13 @@ def main(argv=None):
 
 
 def act(a):
+    if a.action == "held":
+        print(json.dumps(held_list(a.out), ensure_ascii=False))
+        return 0
+    if a.action in ("keep-held", "drop-held"):
+        decide_held(a.out, a.key, a.action == "keep-held")
+        print("%s %s" % ("kept" if a.action == "keep-held" else "dropped", a.key))
+        return 0
     if a.action == "edit-fact":
         edit_fact(a.out, a.key, a.number, a.text, a.expect)
         print("edited fact %d of %s" % (a.number, a.key))

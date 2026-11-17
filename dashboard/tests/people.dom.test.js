@@ -27,6 +27,33 @@ describe('People page', () => {
     expect(el.textContent).toContain('Hello there')
   })
 
+  it('a kind fact suggestion shows fact, reason and quote, and decides like a field', async () => {
+    const FACT = { id: 'held-abc', kind: 'fact', person_id: 'p1', person_name: 'Alma', value: { fact: 'Plays cello.', why: 'negative or past; check by hand' }, quote: 'I play cello' }
+    const adapter = fakeAdapter({ listSuggestions: async () => ({ suggestions: [FACT, SUG] }) })
+    setHost({ adapter })
+    const { el } = await mount(People)
+    expect(el.textContent).toContain('Check by hand')
+    expect(el.textContent).toContain('Plays cello.')
+    expect(el.textContent).toContain('negative or past; check by hand')
+    expect(el.textContent).toContain('I play cello')
+    expect(el.textContent).not.toContain('undefined')
+    expect(el.textContent).toContain('Place')
+    expect(el.textContent).toContain('Lisbon')
+    await click(el, 'Accept')
+    expect(adapter.decideSuggestion).toHaveBeenCalledWith('held-abc', 'accept')
+  })
+
+  it('accepting a fact reloads an already open Found in chats panel', async () => {
+    const FACT = { id: 'held-abc', kind: 'fact', person_id: 'p1', person_name: 'Alma', value: { fact: 'Plays cello.', why: 'check by hand' }, quote: 'q' }
+    const adapter = fakeAdapter({ listSuggestions: async () => ({ suggestions: [FACT] }) })
+    setHost({ adapter })
+    const { el } = await mount(People)
+    await click(el, 'Found in chats')
+    const before = adapter.listFacts.mock.calls.length
+    await click(el, 'Accept')
+    expect(adapter.listFacts.mock.calls.length).toBeGreaterThan(before)
+  })
+
   it('Accept calls decideSuggestion then reloads the roster', async () => {
     const adapter = fakeAdapter({ listSuggestions: async () => ({ suggestions: [SUG] }) })
     setHost({ adapter })

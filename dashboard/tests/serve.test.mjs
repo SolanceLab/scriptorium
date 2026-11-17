@@ -148,3 +148,23 @@ test('facts: each fact carries a fingerprint and a change passes it to review.py
   assert.equal((await patch('/api/facts/alma/2', { remove: true, rev: '--out' })).status, 400)
   assert.equal(calls.length, 0)
 })
+
+test('held facts: GET merges them as kind fact; POST accept and dismiss call keep-held and drop-held', async () => {
+  const held = [{ id: 'abcdef012345', person_id: 'alma', person_name: 'Alma', fact: 'Plays cello.', why: 'check by hand', quote: 'I play cello', message_id: 'm1', at: '2026-11-01T02:00:00Z' }]
+  const saved = nextResult
+  nextResult = { code: 0, stdout: JSON.stringify(held), stderr: '' }
+  try {
+    const body = await (await api('/api/suggestions')).json()
+    assert.equal(body.suggestions.length, 3)
+    assert.deepEqual(body.suggestions[2], { id: 'held-abcdef012345', kind: 'fact', status: 'pending', person_id: 'alma', person_name: 'Alma',
+      value: { fact: 'Plays cello.', why: 'check by hand' }, quote: 'I play cello' })
+    calls.length = 0
+    assert.equal((await api('/api/suggestions/held-abcdef012345/accept', { method: 'POST' })).status, 200)
+    assert.equal((await api('/api/suggestions/held-abcdef012345/dismiss', { method: 'POST' })).status, 200)
+    assert.deepEqual(calls, [
+      ['/engine/review.py', '--out', out, '--cards', cards, 'keep-held', 'abcdef012345'],
+      ['/engine/review.py', '--out', out, '--cards', cards, 'drop-held', 'abcdef012345'],
+    ])
+    assert.equal((await api('/api/suggestions/held-nothex/accept', { method: 'POST' })).status, 404)
+  } finally { nextResult = saved }
+})

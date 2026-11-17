@@ -88,6 +88,18 @@ export async function loadSuggestions(outDir) {
     .map((s) => ({ ...s, id: s.n, person_name: s.name || s.person_name || '' }))
 }
 
+/** Facts the nightly run set aside ("check by hand"), as suggestions of kind 'fact'. review.py holds the rules; a failure shows none. */
+export async function loadHeld(review) {
+  const r = await review('held')
+  if (r.code !== 0) return []
+  let list
+  try { list = JSON.parse(r.stdout) } catch { return [] }
+  if (!Array.isArray(list)) return []
+  return list.filter((h) => isObj(h) && /^[0-9a-f]{12}$/.test(String(h.id)) && typeof h.fact === 'string')
+    .map((h) => ({ id: 'held-' + h.id, kind: 'fact', status: 'pending', person_id: h.person_id, person_name: h.person_name || '',
+      value: { fact: h.fact, why: h.why || '' }, quote: h.quote || '' }))
+}
+
 /** A short fingerprint of a fact's own words; the same as review.py's, so a change can name the fact it means. */
 export function factRev(f) {
   const q = typeof f.quote === 'string' ? f.quote : ''
@@ -141,10 +153,15 @@ export function createLocalHost({ cards, out, engine = findEngine(), root = reso
     const path = url.pathname
     const m = req.method
     if (path === '/api/people' && m === 'GET') return json(res, 200, { people: await loadPeople(cards, out) })
-    if (path === '/api/suggestions' && m === 'GET') return json(res, 200, { suggestions: await loadSuggestions(out) })
+    if (path === '/api/suggestions' && m === 'GET') return json(res, 200, { suggestions: [...await loadSuggestions(out), ...await loadHeld(review)] })
     let hit = path.match(/^\/api\/suggestions\/(\d+)\/(accept|dismiss)$/)
     if (hit && m === 'POST') {
       const r = await review(hit[2], hit[1])
+      return r.code === 0 ? json(res, 200, { ok: true }) : failed(res, r)
+    }
+    hit = path.match(/^\/api\/suggestions\/held-([0-9a-f]{12})\/(accept|dismiss)$/)
+    if (hit && m === 'POST') {
+      const r = await review(hit[2] === 'accept' ? 'keep-held' : 'drop-held', hit[1])
       return r.code === 0 ? json(res, 200, { ok: true }) : failed(res, r)
     }
     if (path === '/api/facts' && m === 'GET') {
