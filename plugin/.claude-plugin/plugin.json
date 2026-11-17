@@ -1,7 +1,7 @@
 {
   "name": "scriptorium",
   "description": "Scriptorium: turn your chat history into memories you can check, each with its exact words, source lines and real date.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": { "name": "House of Solance" },
   "license": "PolyForm-Noncommercial-1.0.0",
   "userConfig": {

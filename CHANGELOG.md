@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+Fix: times with a short fraction of a second, such as `2026-11-16T22:24:42.02+07:00`, are now read on Python 3.9 and 3.10. Postgres drops trailing zeros from the fraction, and those Python versions read only 3 or 6 digits, so a message like that counted as having no time: the roster run failed and its cursor stayed put every night. The README has always said Python 3.9 or newer, and the Python that ships with macOS is 3.9.
+
 ## 1.2.0
 
 Matching people to their own messages: a message is now tied to the person who wrote it when the sender's name is the person's first name, or the same name in a different letter style, as long as only one card fits; a name two cards share never ties a message to either. Account ids: a message may carry `sender_id`, and a card `ids` and `shared_ids`, so an author is matched by account before name (see CONTRACT.md). The roster step takes a prompt file of your own (`--prompt`, `--found-prompt`), and the server reports the plugin's version.
