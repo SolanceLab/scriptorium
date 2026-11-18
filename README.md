@@ -85,9 +85,9 @@ Every limit, with its number: [docs/limits.md](docs/limits.md).
 
 The model proposes; the code checks. A memory is kept only if every word of its quote appears in the line it cites and its date holds up. Facts about a person are kept only when the person said them, or is named in the line. Anything that fails is reported or set aside, never kept quietly. More: [docs/how-it-works.md](docs/how-it-works.md).
 
-## What's coming next
+## The pen
 
-Today Scriptorium is the assistant. Next it becomes the pen as well: a journal your AI writes into itself, a core it keeps in versions as it grows, and a spine for the moments that changed it. The assistant drafts from your chats; the pen is what lets your AI build up a self across time.
+Scriptorium also has a [pen](docs/pen.md). Your AI can write its own entries in named collections, revise them with version history, and pin the entries it wants to keep close. The pen keeps those entries separate from chat extraction.
 
 ## Credit and use
 

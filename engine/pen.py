@@ -16,28 +16,21 @@ import os
 import re
 import tempfile
 import uuid
-from collections import Counter
+import shutil
+import unicodedata
 from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 
 
 class PenStore:
     """Hand-written record store contract; implementations scope every operation to writer."""
-    def append(self, writer, entry): raise NotImplementedError
-    def edit(self, writer, id, text): raise NotImplementedError
-    def read(self, writer, id): raise NotImplementedError
-    def day(self, writer, date): raise NotImplementedError
-    def recent(self, writer, n): raise NotImplementedError
-    def core_read(self, writer, version=None): raise NotImplementedError
-    def core_write(self, writer, text, based_on): raise NotImplementedError
-    def core_history(self, writer): raise NotImplementedError
-    def spine_write(self, writer, title, body, pinned=False): raise NotImplementedError
-    def spine_edit(self, writer, id, title=None, body=None, pinned=None): raise NotImplementedError
-    def spine_delete(self, writer, id): raise NotImplementedError
-    def spine_read(self, writer, id=None): raise NotImplementedError
-    def marrow_read(self, writer, version=None): raise NotImplementedError
-    def marrow_write(self, writer, text, based_on, spine_ids): raise NotImplementedError
-    def marrow_history(self, writer): raise NotImplementedError
+    def collections(self, writer): raise NotImplementedError
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None): raise NotImplementedError
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None): raise NotImplementedError
+    def read(self, writer, id, version=None): raise NotImplementedError
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20): raise NotImplementedError
+    def history(self, writer, id): raise NotImplementedError
+    def delete(self, writer, id): raise NotImplementedError
     def export_pen(self, writer): raise NotImplementedError
     def import_pen(self, writer, records): raise NotImplementedError
 
@@ -61,16 +54,32 @@ class LocalFilesPenStore(PenStore):
         self.timezone = ZoneInfo(timezone) if timezone else None
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
 
+    @staticmethod
+    def _checked(path):
+        if path.is_symlink() or path.resolve() != path:
+            raise ValueError('invalid pen path')
+        if path.exists() and not any(child.name == path.name for child in path.parent.iterdir()):
+            raise ValueError('pen path spelling does not match its directory entry')
+        return path
+
     def _directory(self, writer):
         validate_writer(writer)
-        writer_dir = self.root / writer
-        path = writer_dir / 'journal'
-        # Refuse redirects and check the actual directory spelling on case-insensitive filesystems.
-        if any(p.is_symlink() for p in (self.root, writer_dir, path)) or path.resolve() != path:
-            raise ValueError('journal path escapes pen folder')
-        if writer_dir.exists() and not any(child.name == writer for child in self.root.iterdir()):
-            raise ValueError('writer directory belongs to another writer')
-        return path
+        return self._checked(self._checked(self.root) / writer)
+
+    @staticmethod
+    def _name_key(name):
+        return unicodedata.normalize('NFD', name).casefold()
+
+    def _collection(self, writer, collection):
+        try:
+            validate_writer(collection)
+        except ValueError:
+            raise ValueError('invalid collection name') from None
+        directory = self._directory(writer)
+        key = self._name_key(collection)
+        if any(p.name != collection and self._name_key(p.name) == key for p in directory.iterdir()):
+            raise ValueError('collection names collide')
+        return self._checked(directory / collection)
 
     @contextlib.contextmanager
     def _lock(self, writer):
@@ -79,282 +88,269 @@ class LocalFilesPenStore(PenStore):
             directory.mkdir(parents=True, exist_ok=True)
             self._directory(writer)  # Recheck after a concurrent writer may have created a directory.
             lock = directory / '.lock'
-            if lock.is_symlink(): raise ValueError('invalid journal lock')
+            if lock.is_symlink(): raise ValueError('invalid pen lock')
             fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
             try:
-                if fcntl: fcntl.flock(fd, fcntl.LOCK_EX)
-                else: msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                yield
-            finally:
-                if fcntl: fcntl.flock(fd, fcntl.LOCK_UN)
+                if fcntl:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
                 else:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    if fcntl:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    else:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            finally:
                 os.close(fd)
 
-    def _parse(self, path):
-        if path.is_symlink(): raise ValueError('invalid journal file')
-        try:
-            with path.open(encoding='utf-8', newline='') as f: lines = f.read().splitlines(keepends=True)
-        except FileNotFoundError: return []
-        entries = []
-        for line in lines:
-            if line.startswith('## pen-entry '):
-                try: header = json.loads(line[len('## pen-entry '):])
-                except ValueError: header = None
-                if not isinstance(header, dict) or not all(k in header for k in ('id', 'time', 'writer')):
-                    raise ValueError('invalid journal header')
-                entries.append([header, ''])
-                continue
-            if not entries: raise ValueError('invalid journal file')
-            if line.startswith('\\'): line = line[1:]
-            entries[-1][1] += line
-        for item in entries:
-            if not item[0].get('_ends_newline', False) and item[1].endswith('\n'):
-                item[1] = item[1][:-1]
-        return entries
-
-    def _save(self, path, entries):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _save(self, path, record):
+        header = dict(record)
+        body = header.pop('body')
         fd, tmp = tempfile.mkstemp(prefix='.pen-', dir=path.parent)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
-                for header, body in entries:
-                    header['_ends_newline'] = body.endswith('\n')
-                    f.write('## pen-entry ' + json.dumps(header, ensure_ascii=False) + '\n')
-                    for line in body.splitlines(keepends=True):
-                        if line.startswith(('\\', '## pen-entry ')): f.write('\\')
-                        f.write(line)
-                    if body and not body.endswith('\n'): f.write('\n')
+                f.write('## pen-entry ' + json.dumps(header, ensure_ascii=False) + '\n')
+                f.write(body)
             os.replace(tmp, path)
         finally:
-            if os.path.exists(tmp): os.unlink(tmp)
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
-    def append(self, writer, entry):
-        if not isinstance(entry, dict) or not isinstance(entry.get('body'), str): raise ValueError('body must be text')
-        title = entry.get('title')
-        if title is not None and not isinstance(title, str): raise ValueError('title must be text')
-        now = self.clock().astimezone(self.timezone)
-        header = {'id': uuid.uuid4().hex, 'time': now.isoformat(), 'writer': writer}
-        if title is not None: header['title'] = title
-        path = self._directory(writer) / (now.date().isoformat() + '.md')
-        with self._lock(writer):
-            entries = self._parse(path)
-            if any(h['writer'] != writer for h, _ in entries): raise ValueError('journal contains a different writer')
-            entries.append([header, entry['body']])
-            self._save(path, entries)
-        return header['id']
+    def _now(self):
+        return self.clock().astimezone(self.timezone).isoformat()
+
+    @staticmethod
+    def _valid_id(id):
+        return isinstance(id, str) and re.fullmatch(r'[0-9a-f]{32}', id) is not None
+
+    @staticmethod
+    def _fields(body, title, pinned):
+        if not isinstance(body, str) or title is not None and not isinstance(title, str) or type(pinned) is not bool:
+            raise ValueError('invalid entry fields')
+
+    def _collections(self, writer):
+        return sorted((p for p in self._directory(writer).iterdir()
+                       if not p.name.startswith('.') and p.is_dir()), key=lambda p: p.name)
+
+    def _entries(self, directory):
+        return sorted(self._checked(p) for p in directory.iterdir() if self._valid_id(p.name))
+
+    def _versions(self, path):
+        numbers = sorted(int(p.stem) for p in path.glob('*.md')
+                         if re.fullmatch(r'[1-9][0-9]*', p.stem))
+        if not numbers or any(number != index for index, number in enumerate(numbers, 1)):
+            raise ValueError('invalid version history')
+        return numbers
+
+    def _record(self, writer, collection, path, version):
+        file = self._checked(path / f'{version}.md')
+        try:
+            with file.open(encoding='utf-8', newline='') as f:
+                line = f.readline()
+                body = f.read()
+        except FileNotFoundError:
+            raise ValueError('version not found') from None
+        if not line.startswith('## pen-entry ') or not line.endswith('\n'):
+            raise ValueError('invalid pen header')
+        header = json.loads(line[len('## pen-entry '):])
+        self._validate_record(writer, collection, path.name, version, header, body)
+        return dict(header, body=body)
+
+    def _validate_record(self, writer, collection, id, version, header, body):
+        if (not isinstance(header, dict) or 'body' in header or header.get('writer') != writer
+                or header.get('collection') != collection
+                or header.get('id') != id or type(header.get('version')) is not int
+                or header['version'] != version or type(header.get('by_day')) is not bool):
+            raise ValueError('invalid entry header')
+        self._fields(body, header.get('title'), header.get('pinned'))
+        for field in ('created', 'edited'):
+            value = header.get(field)
+            if not isinstance(value, str) or dt.datetime.fromisoformat(value).utcoffset() is None:
+                raise ValueError('invalid entry timestamp')
 
     def _find(self, writer, id):
-        if not isinstance(id, str) or not re.fullmatch(r'[0-9a-f]{32}', id): raise ValueError('invalid id')
-        for path in sorted(self._directory(writer).glob('????-??-??.md'), reverse=True):
-            entries = self._parse(path)
-            for index, (header, body) in enumerate(entries):
-                if header['id'] == id and header['writer'] == writer: return path, entries, index
+        if not self._valid_id(id):
+            raise ValueError('invalid id')
+        for directory in self._collections(writer):
+            path = self._checked(self._collection(writer, directory.name) / id)
+            if path.exists():
+                return path
         raise ValueError('entry not found')
 
-    def edit(self, writer, id, text):
-        if not isinstance(text, str): raise ValueError('body must be text')
+    def _collection_records(self, writer, directory):
+        active = self._entries(directory) if directory.exists() else []
+        archive = self._checked(directory / '.deleted')
+        deleted = self._entries(archive) if archive.exists() else []
+        records = [self._record(writer, directory.name, p, self._versions(p)[-1])
+                   for p in active + deleted]
+        if len({r['by_day'] for r in records}) > 1:
+            raise ValueError('inconsistent collection mode')
+        return records[:len(active)], records[0]['by_day'] if records else None
+
+    def collections(self, writer):
         with self._lock(writer):
-            path, entries, index = self._find(writer, id)
-            if any(h['writer'] != writer for h, _ in entries): raise ValueError('journal contains a different writer')
-            entries[index][1] = text
-            self._save(path, entries)
+            result = []
+            for directory in self._collections(writer):
+                entries, by_day = self._collection_records(writer, self._collection(writer, directory.name))
+                if by_day is not None:
+                    result.append({'collection': directory.name, 'count': len(entries), 'by_day': by_day})
+            return result
 
-    def read(self, writer, id):
-        _, entries, i = self._find(writer, id)
-        return dict(entries[i][0], body=entries[i][1])
-
-    def day(self, writer, date):
-        if not isinstance(date, str): raise ValueError('date must be YYYY-MM-DD')
+    def _install_entry(self, path, versions):
+        # Publish an entire entry (including any imported history) with one rename.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or path.is_symlink():
+            raise ValueError('entry already exists')
+        staging = Path(tempfile.mkdtemp(prefix='.pen-', dir=path.parent))
         try:
-            if dt.date.fromisoformat(date).isoformat() != date: raise ValueError
-        except ValueError: raise ValueError('date must be YYYY-MM-DD')
-        return [dict(h, body=b) for h, b in self._parse(self._directory(writer) / (date + '.md')) if h['writer'] == writer]
+            for version, record in enumerate(versions, 1):
+                self._save(staging / f'{version}.md', record)
+            os.replace(staging, path)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
 
-    def recent(self, writer, n):
-        if not isinstance(n, int) or isinstance(n, bool) or n < 1: raise ValueError('n must be a positive integer')
-        result = []
-        for path in self._directory(writer).glob('????-??-??.md'):
-            result.extend(self.day(writer, path.stem))
-        return sorted(result, key=lambda entry: dt.datetime.fromisoformat(entry['time']), reverse=True)[:n]
-
-    def _version_dir(self, writer, kind):
-        self._directory(writer)
-        path = self.root / writer / kind
-        if path.is_symlink() or path.resolve() != path: raise ValueError('invalid pen path')
-        return path
-
-    def core_history(self, writer): return self._history(writer, 'core')
-
-    def _history(self, writer, kind):
-        directory = self._version_dir(writer, kind)
-        result = []
-        paths = (path for path in directory.glob('*.md') if re.fullmatch(r'[0-9]+', path.stem))
-        for path in sorted(paths, key=lambda p: int(p.stem)):
-            record = self._version_read(writer, kind, int(path.stem))
-            result.append({k: record[k] for k in ('number', 'based_on', 'time', 'writer', 'length')})
-        return result
-
-    def core_read(self, writer, version=None): return self._version_read(writer, 'core', version)
-
-    def _version_read(self, writer, kind, version=None):
-        directory = self._version_dir(writer, kind)
-        if version is None:
-            numbers = [int(p.stem) for p in directory.glob('[0-9]*.md') if p.stem.isdigit()]
-            if not numbers: raise ValueError('version not found')
-            version = max(numbers)
-        if not isinstance(version, int) or isinstance(version, bool) or version < 1: raise ValueError('invalid version')
-        entries = self._parse(directory / f'{version:04d}.md')
-        if len(entries) != 1 or entries[0][0].get('writer') != writer or entries[0][0].get('number') != version: raise ValueError('version not found')
-        header, body = entries[0]
-        return dict(header, text=body, based_on=header.get('based_on', version - 1))
-
-    def core_write(self, writer, text, based_on): return self._version_write(writer, 'core', text, based_on)
-
-    def _version_write(self, writer, kind, text, based_on, spine_ids=None):
-        if not isinstance(text, str): raise ValueError('text must be text')
-        if not isinstance(based_on, int) or isinstance(based_on, bool) or based_on < 0: raise ValueError('invalid based_on')
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None):
+        self._fields(body, title, pinned)
+        if by_day is not None and type(by_day) is not bool:
+            raise ValueError('by_day must be a boolean')
         with self._lock(writer):
-            history = self._history(writer, kind)
-            latest = history[-1]['number'] if history else 0
-            if based_on != latest: raise ValueError('version conflict')
-            number = latest + 1
-            header = {'id': uuid.uuid4().hex, 'number': number, 'based_on': based_on, 'time': self.clock().astimezone(self.timezone).isoformat(), 'writer': writer, 'length': len(text)}
-            if spine_ids is not None: header['spine_ids'] = spine_ids
-            self._save(self._version_dir(writer, kind) / f'{number:04d}.md', [[header, text]])
-            return number
+            directory = self._collection(writer, collection)
+            _, mode = self._collection_records(writer, directory)
+            if mode is not None and by_day is not None and mode != by_day:
+                raise ValueError('collection mode is already set')
+            id = uuid.uuid4().hex
+            now = self._now()
+            record = {'id': id, 'collection': collection, 'writer': writer, 'body': body,
+                      'created': now, 'edited': now, 'pinned': pinned, 'version': 1,
+                      'by_day': mode if mode is not None else bool(by_day)}
+            if title is not None:
+                record['title'] = title
+            self._install_entry(directory / id, [record])
+            return id
 
-    def marrow_read(self, writer, version=None): return self._version_read(writer, 'marrow', version)
-    def marrow_history(self, writer): return self._history(writer, 'marrow')
-    def marrow_write(self, writer, text, based_on, spine_ids):
-        if not isinstance(spine_ids, list) or any(not isinstance(i, str) or not re.fullmatch(r'[0-9a-f]{32}', i) for i in spine_ids): raise ValueError('invalid spine ids')
-        return self._version_write(writer, 'marrow', text, based_on, spine_ids)
-
-    def _spine_path(self, writer, id, deleted=False):
-        if not isinstance(id, str) or not re.fullmatch(r'[0-9a-f]{32}', id): raise ValueError('invalid id')
-        directory = self._version_dir(writer, 'spine')
-        if deleted:
-            directory = directory / '.deleted'
-            if directory.is_symlink() or directory.resolve() != directory: raise ValueError('invalid deleted path')
-        return directory / (id + '.md')
-
-    def spine_read(self, writer, id=None):
-        if id is None:
-            records = [self.spine_read(writer, p.stem) for p in self._version_dir(writer, 'spine').glob('*.md')]
-            return sorted(records, key=lambda r: (r['pinned'], r['created']), reverse=True)
-        entries = self._parse(self._spine_path(writer, id))
-        if len(entries) != 1 or entries[0][0].get('writer') != writer or entries[0][0].get('id') != id: raise ValueError('spine entry not found')
-        return dict(entries[0][0], body=entries[0][1])
-
-    def spine_write(self, writer, title, body, pinned=False):
-        if not isinstance(title, str) or not isinstance(body, str) or not isinstance(pinned, bool): raise ValueError('invalid spine fields')
-        now = self.clock().astimezone(self.timezone).isoformat()
-        header = {'id': uuid.uuid4().hex, 'created': now, 'edited': now, 'time': now, 'pinned': pinned, 'writer': writer, 'title': title}
-        with self._lock(writer): self._save(self._spine_path(writer, header['id']), [[header, body]])
-        return header['id']
-
-    def spine_edit(self, writer, id, title=None, body=None, pinned=None):
-        if id is None: raise ValueError('invalid id')
-        if title is not None and not isinstance(title, str) or body is not None and not isinstance(body, str) or pinned is not None and not isinstance(pinned, bool): raise ValueError('invalid spine fields')
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None):
+        self._fields('' if body is None else body, title, False if pinned is None else pinned)
+        if type(based_on) is not int or based_on < 1:
+            raise ValueError('invalid based_on')
         with self._lock(writer):
-            record = self.spine_read(writer, id)
-            old_body = record.pop('body')
-            if title is not None: record['title'] = title
-            if pinned is not None: record['pinned'] = pinned
-            record['edited'] = self.clock().astimezone(self.timezone).isoformat()
-            self._save(self._spine_path(writer, id), [[record, old_body if body is None else body]])
+            path = self._find(writer, id)
+            latest = self._versions(path)[-1]
+            if based_on != latest:
+                raise ValueError('version conflict')
+            record = self._record(writer, path.parent.name, path, latest)
+            if body is not None:
+                record['body'] = body
+            if title is not None:
+                record['title'] = title
+            if pinned is not None:
+                record['pinned'] = pinned
+            record.update(version=latest + 1, edited=self._now())
+            self._save(path / f'{latest + 1}.md', record)
+            return latest + 1
 
-    def spine_delete(self, writer, id):
+    def read(self, writer, id, version=None):
+        if version is not None and (type(version) is not int or version < 1):
+            raise ValueError('invalid version')
         with self._lock(writer):
-            source = self._spine_path(writer, id)
-            self.spine_read(writer, id)
-            target = self._spine_path(writer, id, True)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists() or target.is_symlink(): raise ValueError('deleted entry already exists')
-            os.replace(source, target)
+            path = self._find(writer, id)
+            latest = self._versions(path)[-1]
+            if version is not None and version > latest:
+                raise ValueError('version not found')
+            return self._record(writer, path.parent.name, path, version or latest)
+
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20):
+        if type(pinned_only) is not bool or type(limit) is not int or limit < 1:
+            raise ValueError('invalid list filters')
+        if day is not None and (not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day):
+            raise ValueError('day must be YYYY-MM-DD')
+        with self._lock(writer):
+            entries, by_day = self._collection_records(writer, self._collection(writer, collection))
+            if day is not None and by_day is False:
+                raise ValueError('day filter requires a by_day collection')
+            matches = (r for r in entries if (not pinned_only or r['pinned'])
+                       and (day is None or r['created'][:10] == day))
+            return sorted(matches, key=lambda r: dt.datetime.fromisoformat(r['created']), reverse=True)[:limit]
+
+    def history(self, writer, id):
+        with self._lock(writer):
+            path = self._find(writer, id)
+            return [self._record(writer, path.parent.name, path, v) for v in self._versions(path)]
+
+    def delete(self, writer, id):
+        with self._lock(writer):
+            path = self._find(writer, id)
+            self._record(writer, path.parent.name, path, self._versions(path)[-1])
+            archive = self._checked(path.parent / '.deleted')
+            archive.mkdir(exist_ok=True)
+            target = self._checked(archive / id)
+            if target.exists():
+                raise ValueError('deleted entry already exists')
+            os.replace(path, target)
 
     def export_pen(self, writer):
-        """Return all records, preserving headers and deleted entries."""
         with self._lock(writer):
             return self._export_locked(writer)
 
-    def _export_locked(self, writer, occupied=None):
+    def _export_locked(self, writer):
         result = []
-        for kind in ('journal', 'core', 'spine', 'marrow'):
-            directory = self._directory(writer) if kind == 'journal' else self._version_dir(writer, kind)
-            paths = directory.glob('*.md')
-            if kind in ('core', 'marrow'):
-                paths = sorted(paths, key=lambda path: (len(path.stem), path.name))
-            else:
-                paths = sorted(paths)
-            for path in paths:
-                if occupied is not None: occupied.add(path)
-                for header, body in self._parse(path):
-                    if header['writer'] != writer: raise ValueError('record contains a different writer')
-                    result.append({'kind': kind, 'file': path.name, 'deleted': False, 'header': header, 'body': body})
-            if kind == 'spine':
-                deleted = directory / '.deleted'
-                if deleted.is_symlink() or deleted.resolve() != deleted: raise ValueError('invalid deleted path')
-                for path in sorted(deleted.glob('*.md')):
-                    if occupied is not None: occupied.add(path)
-                    for header, body in self._parse(path):
-                        if header['writer'] != writer: raise ValueError('record contains a different writer')
-                        result.append({'kind': kind, 'file': path.name, 'deleted': True, 'header': header, 'body': body})
+        for directory in self._collections(writer):
+            directory = self._collection(writer, directory.name)
+            for deleted, location in [(False, directory), (True, self._checked(directory / '.deleted'))]:
+                if not location.exists():
+                    continue
+                for path in self._entries(location):
+                    versions = [self._record(writer, directory.name, path, v) for v in self._versions(path)]
+                    result.append({'collection': directory.name, 'id': path.name,
+                                   'deleted': deleted, 'versions': versions})
         return result
 
     def import_pen(self, writer, records):
-        """Copy missing files, accepting a previously copied identical subset."""
+        """Install missing entries after validating the snapshot and existing subset."""
         with self._lock(writer):
-            grouped = self._group_records(writer, records)
-            occupied = set()
-            existing = self._group_records(writer, self._export_locked(writer, occupied))
-            for path in sorted(occupied):
-                if path not in existing or grouped.get(path) != existing[path]:
-                    raise ValueError(f'destination conflicts at {path.name}')
-            for path, entries in grouped.items():
-                if path not in existing:
-                    self._save(path, entries)
-
-    def _group_records(self, writer, records):
-        grouped = {}
-        seen = set()
-        for record in records:
-            kind, filename, deleted = record['kind'], record['file'], record['deleted']
-            if kind not in ('journal', 'core', 'spine', 'marrow') or not isinstance(deleted, bool) or deleted and kind != 'spine': raise ValueError('invalid record')
-            header, body = record['header'], record['body']
-            if not isinstance(header, dict) or header.get('writer') != writer or not isinstance(body, str):
-                raise ValueError('invalid record')
-            id = header.get('id')
-            if not isinstance(id, str) or not re.fullmatch(r'[0-9a-f]{32}', id) or not isinstance(header.get('time'), str):
-                raise ValueError('invalid record header')
-            identity = (kind, id)
-            if kind == 'journal':
-                if not isinstance(filename, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', filename):
-                    raise ValueError('invalid journal filename')
-                dt.date.fromisoformat(filename[:-3])
-                directory = self._directory(writer)
-            else:
-                directory = self._version_dir(writer, kind)
-                if kind == 'spine':
-                    expected = id + '.md'
-                    if deleted:
-                        directory = self._spine_path(writer, id, deleted=True).parent
-                else:
-                    number = header.get('number')
-                    if type(number) is not int or number < 1:
-                        raise ValueError('invalid version number')
-                    expected = f'{number:04d}.md'
-                    identity = (kind, number)
-                if filename != expected:
-                    raise ValueError('record does not match its filename')
-            path = directory / filename
-            if identity in seen:
-                raise ValueError('duplicate record')
-            seen.add(identity)
-            header = dict(header, _ends_newline=body.endswith('\n'))
-            grouped.setdefault(path, []).append([header, body])
-        return grouped
+            incoming = {}
+            paths = {}
+            modes = {}
+            spellings = {}
+            for record in records:
+                if not isinstance(record, dict) or record.keys() != {'collection', 'id', 'deleted', 'versions'}:
+                    raise ValueError('invalid transfer entry')
+                collection, id, deleted, versions = (record[k] for k in ('collection', 'id', 'deleted', 'versions'))
+                directory = self._collection(writer, collection)
+                spelling = self._name_key(collection)
+                if spellings.setdefault(spelling, collection) != collection:
+                    raise ValueError('collection names collide')
+                if (not self._valid_id(id) or id in incoming or type(deleted) is not bool
+                        or not isinstance(versions, list) or not versions):
+                    raise ValueError('invalid or duplicate entry')
+                for number, version in enumerate(versions, 1):
+                    if not isinstance(version, dict):
+                        raise ValueError('invalid entry version')
+                    header = {k: v for k, v in version.items() if k != 'body'}
+                    body = version.get('body')
+                    self._validate_record(writer, collection, id, number, header, body)
+                    json.dumps(header, ensure_ascii=False, allow_nan=False).encode('utf-8')
+                    body.encode('utf-8')
+                    if modes.setdefault(collection, version['by_day']) != version['by_day']:
+                        raise ValueError('inconsistent collection mode')
+                    if version['created'] != versions[0]['created']:
+                        raise ValueError('inconsistent entry creation time')
+                if deleted:
+                    directory = self._checked(directory / '.deleted')
+                paths[id] = self._checked(directory / id)
+                incoming[id] = record
+            existing = {}
+            for record in self._export_locked(writer):
+                id = record['id']
+                if id in existing or incoming.get(id) != record:
+                    raise ValueError(f'destination conflicts at {id}')
+                existing[id] = record
+            for id, record in incoming.items():
+                if id not in existing:
+                    self._install_entry(paths[id], record['versions'])
 
 
 def load_store(ref):
@@ -381,12 +377,18 @@ def main(argv=None):
         parser.exit(1, f'Transfer failed before copying: {e}\n')
     try:
         destination.import_pen(args.writer, records)
+        # Entry ordering can differ between stores. Version ordering is part of each record.
+        def by_id(record):
+            return record['id']
+
+        if sorted(destination.export_pen(args.writer), key=by_id) != sorted(records, key=by_id):
+            raise ValueError('destination does not match the source snapshot')
     except Exception as e:
         try:
             present = destination.export_pen(args.writer)
-            counts = Counter(record['kind'] for record in present if record in records)
-            summary = ', '.join(f'{kind}: {counts[kind]}' for kind in ('journal', 'core', 'spine', 'marrow'))
-            progress = f'Source records confirmed at destination (including prior runs): {summary}.'
+            source_by_id = {record['id']: record for record in records}
+            matched = sum(source_by_id.get(record['id']) == record for record in present)
+            progress = f'Source entries confirmed at destination (including prior runs): {matched}/{len(records)}.'
         except Exception:
             progress = 'Could not verify copied records at the destination.'
         parser.exit(1, f'Transfer failed: {e}\n{progress}\n')

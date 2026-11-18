@@ -78,30 +78,33 @@ TOOLS = [
 ]
 
 
+_TEXT = {"type": "string"}
+_POSITIVE = {"type": "integer", "minimum": 1}
+_BOOL = {"type": "boolean"}
+
+_PEN_ARGUMENT_TYPES = {"string": str, "boolean": bool, "integer": int}
 PEN_TOOLS = [
-    {"name": "journal_write", "description": "Write a journal entry.", "inputSchema": {"type": "object", "properties": {"body": {"type": "string"}, "title": {"type": "string"}}, "required": ["body"], "additionalProperties": False}},
-    {"name": "journal_edit", "description": "Edit a journal entry.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "body": {"type": "string"}}, "required": ["id", "body"], "additionalProperties": False}},
-    {"name": "journal_read", "description": "Read an entry by id or a day's entries by date.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "date": {"type": "string"}}, "additionalProperties": False}},
-    {"name": "journal_recent", "description": "Read recent entries, newest first.", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}, "additionalProperties": False}},
+    {"name": name, "description": description,
+     "inputSchema": {"type": "object", "properties": properties,
+                     "required": required, "additionalProperties": False}}
+    for name, description, properties, required in [
+        ("pen_collections", "List your collections and counts of active entries.", {}, []),
+        ("pen_write", "Write an entry. On first write, set by_day to group by creation day.",
+         {"collection": _TEXT, "body": _TEXT, "title": _TEXT, "pinned": _BOOL, "by_day": _BOOL},
+         ["collection", "body"]),
+        ("pen_edit", "Edit an entry using its current version as based_on.",
+         {"id": _TEXT, "based_on": _POSITIVE, "body": _TEXT, "title": _TEXT, "pinned": _BOOL},
+         ["id", "based_on"]),
+        ("pen_read", "Read the latest or a specific version of an entry.",
+         {"id": _TEXT, "version": _POSITIVE}, ["id"]),
+        ("pen_list", "List active entries in a collection, newest first.",
+         {"collection": _TEXT, "pinned_only": _BOOL, "day": _TEXT, "limit": _POSITIVE}, ["collection"]),
+        ("pen_history", "Read all versions of an entry, oldest first.", {"id": _TEXT}, ["id"]),
+        ("pen_delete", "Move an entry and its history aside for recovery.", {"id": _TEXT}, ["id"]),
+    ]
 ]
+_PEN_SCHEMAS = {tool["name"]: tool["inputSchema"] for tool in PEN_TOOLS}
 
-for _name, _properties, _required in [
-    ("core_read", {"version": {"type": "integer", "minimum": 1}}, []),
-    ("core_write", {"text": {"type": "string"}, "based_on": {"type": "integer", "minimum": 0}}, ["text", "based_on"]),
-    ("core_history", {}, []),
-]:
-    PEN_TOOLS.append({"name": _name, "description": _name.replace("_", " "), "inputSchema": {"type": "object", "properties": _properties, "required": _required, "additionalProperties": False}})
-
-for _name, _properties, _required in [
-    ("spine_write", {"title": {"type": "string"}, "body": {"type": "string"}, "pinned": {"type": "boolean"}}, ["title", "body"]),
-    ("spine_edit", {"id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "pinned": {"type": "boolean"}}, ["id"]),
-    ("spine_delete", {"id": {"type": "string"}}, ["id"]),
-    ("spine_read", {"id": {"type": "string"}}, []),
-    ("marrow_read", {"version": {"type": "integer", "minimum": 1}}, []),
-    ("marrow_write", {"text": {"type": "string"}, "based_on": {"type": "integer"}, "spine_ids": {"type": "array", "items": {"type": "string"}}}, ["text", "based_on", "spine_ids"]),
-    ("marrow_history", {}, []),
-]:
-    PEN_TOOLS.append({"name": _name, "description": _name.replace("_", " "), "inputSchema": {"type": "object", "properties": _properties, "required": _required, "additionalProperties": False}})
 
 class Config:
     root = None
@@ -223,36 +226,29 @@ def _error(rid, code, message):
 def pen_tool(name, args, writer):
     if writer is None:
         return "no writer is assigned to this key", True
-    allowed = {"journal_write": {"body", "title"}, "journal_edit": {"id", "body"},
-               "journal_read": {"id", "date"}, "journal_recent": {"n"}, "core_read": {"version"}, "core_write": {"text", "based_on"}, "core_history": set(), "spine_write": {"title", "body", "pinned"}, "spine_edit": {"id", "title", "body", "pinned"}, "spine_delete": {"id"}, "spine_read": {"id"}, "marrow_read": {"version"}, "marrow_write": {"text", "based_on", "spine_ids"}, "marrow_history": set()}
-    if set(args) - allowed[name]:
+    schema = _PEN_SCHEMAS[name]
+    properties = schema["properties"]
+    if set(args) - properties.keys():
         return "unknown argument", True
+    if set(schema["required"]) - args.keys():
+        return "missing required argument", True
+    for argument, value in args.items():
+        prop = properties[argument]
+        if type(value) is not _PEN_ARGUMENT_TYPES[prop["type"]] or (
+            "minimum" in prop and value < prop["minimum"]
+        ):
+            return f"invalid {argument}", True
     if not _one_write.acquire(blocking=False):
         return "another write is running; try again when it finishes", True
     try:
-        store = Config.pen
-        if name == "journal_write": result = {"id": store.append(writer, args)}
-        elif name == "journal_edit":
-            store.edit(writer, args.get("id"), args.get("body"))
+        method = getattr(Config.pen, name[4:])
+        result = method(writer, **args)
+        if name == "pen_write":
+            result = {"id": result}
+        elif name == "pen_edit":
+            result = {"version": result}
+        elif name == "pen_delete":
             result = {"ok": True}
-        elif name == "journal_read":
-            if ("id" in args) == ("date" in args): raise ValueError("provide exactly one of id or date")
-            result = store.read(writer, args["id"]) if "id" in args else store.day(writer, args["date"])
-        elif name == "journal_recent": result = store.recent(writer, args.get("n", 5))
-        elif name == "core_read": result = store.core_read(writer, args.get("version"))
-        elif name == "core_write": result = {"number": store.core_write(writer, args.get("text"), args.get("based_on"))}
-        elif name == "core_history": result = store.core_history(writer)
-        elif name == "spine_write": result = {"id": store.spine_write(writer, args.get("title"), args.get("body"), args.get("pinned", False))}
-        elif name == "spine_edit":
-            store.spine_edit(writer, args.get("id"), args.get("title"), args.get("body"), args.get("pinned"))
-            result = {"ok": True}
-        elif name == "spine_delete":
-            store.spine_delete(writer, args.get("id"))
-            result = {"ok": True}
-        elif name == "spine_read": result = store.spine_read(writer, args.get("id"))
-        elif name == "marrow_read": result = store.marrow_read(writer, args.get("version"))
-        elif name == "marrow_write": result = {"number": store.marrow_write(writer, args.get("text"), args.get("based_on"), args.get("spine_ids"))}
-        else: result = store.marrow_history(writer)
         return json.dumps(result, ensure_ascii=False), False
     except (ValueError, OSError) as e:
         return str(e), True
@@ -388,20 +384,15 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
         if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
         try:
             store = getattr(importlib.import_module(mod), attr)
-            journal = ("append", "edit", "read", "day", "recent")
-            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in journal)):
+            methods = [tool["name"][4:] for tool in PEN_TOOLS]
+            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in methods)):
                 store = store()
 
-            def implements(name):
+            for name in methods:
                 method = getattr(store, name, None)
-                return callable(method) and getattr(method, "__func__", method) is not getattr(PenStore, name, None)
-
-            if not all(implements(name) for name in journal):
-                raise ValueError("pen store lacks a required journal method")
-            Config.pen_tools = [
-                tool for tool in PEN_TOOLS
-                if tool["name"].startswith("journal_") or implements(tool["name"])
-            ]
+                if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, name):
+                    raise ValueError(f"pen store lacks required method: {name}")
+            Config.pen_tools = PEN_TOOLS
             Config.pen = store
         except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))
     else:

@@ -1,5 +1,5 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
-"""Journal behavior and separation from extraction."""
+"""Pen behavior and separation from extraction."""
 import ast
 import contextlib
 import io
@@ -21,13 +21,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'mcp'), str(ROOT / 'engine')]
 from engine.pen import LocalFilesPenStore, PenStore, main
 import server
+import engine.pen as pen_module
 import roster
 import nightly
 
 
 def append_many(root):
     store = LocalFilesPenStore(root, 'UTC', lambda: dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
-    for _ in range(12): store.append('parallel', {'body': 'entry'})
+    for _ in range(12): store.write('parallel', 'notes', 'entry', by_day=True)
+
+
+def race_edit(root, id, body, start, outcomes):
+    store = LocalFilesPenStore(root, 'UTC')
+    start.wait(10)
+    try:
+        outcomes.put(store.edit('parallel', id, 1, body=body))
+    except ValueError as error:
+        outcomes.put(str(error))
 
 
 class PenTests(unittest.TestCase):
@@ -45,86 +55,51 @@ class PenTests(unittest.TestCase):
         result = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': args}}, writer)['result']
         return result['isError'], result['content'][0]['text']
 
-    def test_tools_and_isolation(self):
-        for writer in ('alpha', 'beta'):
-            err, value = self.call(writer, 'journal_write', {'body': 'first\n', 'title': 'Title'})
-            self.assertFalse(err, value)
-            id = json.loads(value)['id']
-            self.assertFalse(self.call(writer, 'journal_edit', {'id': id, 'body': 'changed'})[0])
-            self.assertEqual(json.loads(self.call(writer, 'journal_read', {'id': id})[1])['body'], 'changed')
-            self.assertEqual(len(json.loads(self.call(writer, 'journal_read', {'date': '2026-01-02'})[1])), 1)
-            self.assertEqual(json.loads(self.call(writer, 'journal_recent', {})[1])[0]['id'], id)
-            other = 'beta' if writer == 'alpha' else 'alpha'
-            self.assertTrue(self.call(other, 'journal_read', {'id': id})[0])
-            self.assertTrue(self.call(other, 'journal_edit', {'id': id, 'body': 'bad'})[0])
-            self.assertTrue(self.call(other, 'journal_read', {'id': id, 'writer': writer})[0])
-        self.assertTrue(self.call(None, 'journal_recent', {})[0])
+    def success(self, writer, name, **args):
+        error, result = self.call(writer, name, args)
+        self.assertFalse(error, result)
+        return json.loads(result)
 
-    def test_core_tools(self):
-        for writer in ('alpha', 'beta'):
-            self.assertTrue(self.call(writer, 'core_read', {})[0])
-            self.assertFalse(self.call(writer, 'core_write', {'text': writer, 'based_on': 0})[0])
-            self.assertTrue(self.call(writer, 'core_write', {'text': 'stale', 'based_on': 0})[0])
-            self.assertEqual(json.loads(self.call(writer, 'core_read', {'version': 1})[1])['text'], writer)
-            self.assertEqual(json.loads(self.call(writer, 'core_history', {})[1])[0]['number'], 1)
-            for name, args in [('core_read', {}), ('core_write', {'text': 'x', 'based_on': 1}), ('core_history', {})]:
-                self.assertTrue(self.call(writer, name, dict(args, writer='other'))[0])
-        with mock.patch('engine.pen.os.replace', side_effect=OSError('failure')):
-            self.assertTrue(self.call('alpha', 'core_write', {'text': 'new', 'based_on': 1})[0])
-        self.assertEqual(len(self.store.core_history('alpha')), 1)
+    def test_tools_and_versions(self):
+        writer = 'alpha'
+        id = self.success(writer, 'pen_write', collection='daily', body='First', by_day=True)['id']
+        self.assertEqual(self.success(writer, 'pen_edit', id=id, based_on=1,
+                                      body='Second', title='Title', pinned=True), {'version': 2})
+        self.assertTrue(self.call(writer, 'pen_edit', {'id': id, 'based_on': 1, 'body': 'Stale'})[0])
+        first = self.success(writer, 'pen_read', id=id, version=1)
+        latest = self.success(writer, 'pen_read', id=id)
+        self.assertEqual((first['body'], first['pinned']), ('First', False))
+        self.assertEqual((latest['body'], latest['title'], latest['pinned']), ('Second', 'Title', True))
+        self.assertEqual(self.success(writer, 'pen_history', id=id), [first, latest])
+        newer = dt.datetime(2026, 1, 2, 19, tzinfo=dt.timezone.utc)
+        self.store.clock = lambda: newer
+        other = self.success(writer, 'pen_write', collection='daily', body='Another')['id']
+        self.assertEqual(self.success(writer, 'pen_collections'),
+                         [{'collection': 'daily', 'count': 2, 'by_day': True}])
+        self.assertEqual(self.success(writer, 'pen_list', collection='daily', day='2026-01-02'), [latest])
+        self.assertEqual(self.success(writer, 'pen_list', collection='daily', pinned_only=True), [latest])
+        self.assertEqual(self.success(writer, 'pen_list', collection='daily', limit=1)[0]['id'], other)
+        self.assertTrue(self.call(writer, 'pen_write', {'collection': 'daily', 'body': 'x', 'by_day': False})[0])
+        self.assertEqual(self.success(writer, 'pen_delete', id=id), {'ok': True})
+        self.assertTrue(self.call(writer, 'pen_read', {'id': id})[0])
+        directory = self.store.root / writer / 'daily'
+        (directory / '.deleted' / id).rename(directory / id)
+        self.assertEqual(self.success(writer, 'pen_history', id=id), [first, latest])
 
-    def test_legacy_version_without_saved_base(self):
-        for kind in ('core', 'marrow'):
-            write = getattr(self.store, kind + '_write')
-            read = getattr(self.store, kind + '_read')
-            extra = ([],) if kind == 'marrow' else ()
-            write('alpha', 'first', 0, *extra)
-            write('alpha', 'second', 1, *extra)
-            path = self.store.root / 'alpha' / kind / '0002.md'
-            path.write_text(path.read_text().replace('"based_on": 1, ', ''))
-            self.assertNotIn('based_on', self.store._parse(path)[0][0])
-            self.assertEqual(read('alpha', 2)['based_on'], 1)
-            self.assertEqual(getattr(self.store, kind + '_history')('alpha')[-1]['based_on'], 1)
-
-    def test_spine_and_marrow_tools(self):
-        for writer in ('alpha', 'beta'):
-            other = 'beta' if writer == 'alpha' else 'alpha'
-            err, value = self.call(writer, 'spine_write', {'title': 'title', 'body': writer, 'pinned': True})
-            self.assertFalse(err, value)
-            id = json.loads(value)['id']
-            self.assertTrue(self.call(other, 'spine_read', {'id': id})[0])
-            self.assertTrue(self.call(other, 'spine_edit', {'id': id, 'body': 'bad'})[0])
-            self.assertTrue(self.call(other, 'spine_delete', {'id': id})[0])
-            self.assertFalse(self.call(writer, 'spine_edit', {'id': id, 'body': 'updated'})[0])
-            self.assertEqual(json.loads(self.call(writer, 'spine_read', {})[1])[0]['body'], 'updated')
-            self.assertFalse(self.call(writer, 'marrow_write', {'text': writer, 'based_on': 0, 'spine_ids': [id]})[0])
-            self.assertTrue(self.call(writer, 'marrow_write', {'text': 'stale', 'based_on': 0, 'spine_ids': []})[0])
-            self.assertEqual(json.loads(self.call(writer, 'marrow_read', {'version': 1})[1])['spine_ids'], [id])
-            self.assertEqual(len(json.loads(self.call(writer, 'marrow_history', {})[1])), 1)
-            self.store.core_write(writer, writer, 0)
-            self.store.append(writer, {'body': writer})
-            self.assertFalse(self.call(writer, 'spine_delete', {'id': id})[0])
-            self.assertTrue((Path(self.tmp.name) / 'pen' / writer / 'spine' / '.deleted' / (id + '.md')).is_file())
-            for name, args in [('spine_write', {'title': 't', 'body': 'b'}), ('spine_read', {}), ('spine_edit', {'id': id}), ('spine_delete', {'id': id}), ('marrow_read', {}), ('marrow_write', {'text': 'x', 'based_on': 1, 'spine_ids': []}), ('marrow_history', {})]:
-                self.assertTrue(self.call(writer, name, dict(args, writer=other))[0])
     def seed_transfer(self):
         for writer in ('alpha', 'beta'):
             for day in range(1, 4):
-                now = dt.datetime(2026, 1, day, 12, tzinfo=dt.timezone.utc)
-                self.store.clock = lambda: now
-                for index in range(2):
-                    self.store.append(writer, {'title': f'Day {day}', 'body': f'{writer} journal {day}/{index}'})
-            ids = [
-                self.store.spine_write(writer, 'Pinned', f'{writer} original', True),
-                self.store.spine_write(writer, 'Unpinned', f'{writer} active'),
-                self.store.spine_write(writer, 'Deleted', f'{writer} archived'),
-            ]
-            self.store.clock = lambda: dt.datetime(2026, 1, 4, 12, tzinfo=dt.timezone.utc)
-            self.store.spine_edit(writer, ids[0], title='Edited', body=f'{writer} revised')
-            for base in range(3):
-                self.store.core_write(writer, f'{writer} core {base}', base)
-                self.store.marrow_write(writer, f'{writer} marrow {base}', base, ids[:base + 1])
-            self.store.spine_delete(writer, ids[-1])
+                self.store.clock = lambda: dt.datetime(2026, 1, day, 18, tzinfo=dt.timezone.utc)
+                self.store.write(writer, 'daily', f'{writer} day {day}', by_day=True)
+            for collection in ('notes', 'decisions'):
+                id = self.store.write(writer, collection, f'{writer} original', title='First', pinned=True)
+                self.store.clock = lambda: dt.datetime(2026, 1, 5, 18, tzinfo=dt.timezone.utc)
+                self.store.edit(writer, id, 1, body=f'{writer} revision', title='Second')
+                version = self.store.root / writer / collection / id / '2.md'
+                version.write_text(version.read_text().replace('"version": 2', '"version": 2, "extra": {"value": 7}'))
+                self.store.edit(writer, id, 2, pinned=False)
+                if collection == 'decisions':
+                    self.store.delete(writer, id)
 
     def transfer_args(self, dest, writer):
         return ['transfer', '--from', 'local:' + self.tmp.name, '--to', 'local:' + dest, '--writer', writer]
@@ -134,112 +109,132 @@ class PenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as dest:
             copied = LocalFilesPenStore(dest)
             for writer in ('alpha', 'beta'):
-                with self.subTest(writer=writer):
-                    result = subprocess.run([sys.executable, str(ROOT / 'engine/pen.py'), *self.transfer_args(dest, writer)],
-                                            capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    # Deep equality covers ids, full headers, bodies, filenames and deleted flags.
-                    source_records = self.store.export_pen(writer)
-                    copied_records = copied.export_pen(writer)
-                    self.assertEqual(source_records, copied_records)
-                    self.assertEqual({r['file'] for r in copied_records if r['kind'] == 'journal'},
-                                     {'2026-01-01.md', '2026-01-02.md', '2026-01-03.md'})
-                    self.assertEqual([r['header']['title'] for r in copied_records if r['deleted']], ['Deleted'])
-                    active = copied.spine_read(writer)
-                    self.assertEqual(active, self.store.spine_read(writer))
-                    self.assertEqual([record['pinned'] for record in active], [True, False])
-                    self.assertNotEqual(active[0]['created'], active[0]['edited'])
-                    for kind in ('core', 'marrow'):
-                        history = getattr(copied, kind + '_history')(writer)
-                        self.assertEqual(history, getattr(self.store, kind + '_history')(writer))
-                        self.assertEqual([(v['number'], v['based_on']) for v in history], [(1, 0), (2, 1), (3, 2)])
-                        for version in (1, 2, 3):
-                            self.assertEqual(getattr(copied, kind + '_read')(writer, version),
-                                             getattr(self.store, kind + '_read')(writer, version))
+                result = subprocess.run([sys.executable, str(ROOT / 'engine/pen.py'), *self.transfer_args(dest, writer)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                source = self.store.export_pen(writer)
+                self.assertEqual(copied.export_pen(writer), source)
+                self.assertEqual(copied.collections(writer), self.store.collections(writer))
+                self.assertEqual(copied.list(writer, 'daily', day='2026-01-02'),
+                                 self.store.list(writer, 'daily', day='2026-01-02'))
+                for record in source:
+                    if record['deleted']:
+                        self.assertEqual(record['collection'], 'decisions')
+                        with self.assertRaises(ValueError):
+                            copied.read(writer, record['id'])
+                    else:
+                        self.assertEqual(copied.history(writer, record['id']), record['versions'])
+                        for version in record['versions']:
+                            self.assertEqual(copied.read(writer, record['id'], version['version']), version)
+                for record in (r for r in source if r['collection'] != 'daily'):
+                    self.assertEqual([r['version'] for r in record['versions']], [1, 2, 3])
+                    self.assertEqual([r['pinned'] for r in record['versions']], [True, True, False])
+                    self.assertEqual(record['versions'][2]['extra'], {'value': 7})
 
-    def test_transfer_reports_midway_failure_and_resumes(self):
+    def test_transfer_resumes_after_interrupted_version_copy(self):
         self.seed_transfer()
+        writer = 'alpha'
+        source = self.store.export_pen(writer)
+        save = LocalFilesPenStore._save
+
+        def fail_partway(store, path, record):
+            if path.name == '2.md':
+                raise OSError('simulated interruption')
+            save(store, path, record)
+
         with tempfile.TemporaryDirectory() as dest:
-            args = self.transfer_args(dest, 'alpha')
-            copied = LocalFilesPenStore(dest)
-            original_replace = os.replace
-
-            def fail_at_core(source, target):
-                if target.parent.name == 'core' and target.name == '0002.md':
-                    raise OSError('simulated destination error')
-                original_replace(source, target)
-
             stderr = io.StringIO()
-            with mock.patch('engine.pen.os.replace', side_effect=fail_at_core), contextlib.redirect_stderr(stderr):
-                with self.assertRaises(SystemExit) as exc:
+            args = self.transfer_args(dest, writer)
+            with mock.patch.object(LocalFilesPenStore, '_save', fail_partway), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as failure:
                     main(args)
-            self.assertEqual(exc.exception.code, 1)
-            self.assertIn('simulated destination error', stderr.getvalue())
-            self.assertIn('journal: 6, core: 1, spine: 0, marrow: 0', stderr.getvalue())
-            self.assertEqual(copied.export_pen('alpha'), self.store.export_pen('alpha')[:7])
-            self.assertEqual(list(Path(dest).rglob('.pen-*')), [])
-            first_day = self.store.root / 'alpha' / 'journal' / '2026-01-01.md'
-            unchanged = first_day.read_bytes()
-            self.store.clock = lambda: dt.datetime(2026, 1, 1, 12, tzinfo=dt.timezone.utc)
-            self.store.append('alpha', {'body': 'the source changed after the failure'})
-            with contextlib.redirect_stderr(io.StringIO()) as conflict, self.assertRaises(SystemExit):
-                main(args)
-            self.assertIn('destination conflicts at 2026-01-01.md', conflict.getvalue())
-            first_day.write_bytes(unchanged)
+            self.assertEqual(failure.exception.code, 1)
+            self.assertIn('3/5', stderr.getvalue())
+            copied = LocalFilesPenStore(dest)
+            before = copied.export_pen(writer)
+            self.assertEqual(before, source[:3])
+            self.assertFalse(list(copied.root.rglob('.pen-*')))
             main(args)
-            self.assertEqual(copied.export_pen('alpha'), self.store.export_pen('alpha'))
             with mock.patch.object(LocalFilesPenStore, '_save', side_effect=AssertionError('retry rewrites data')):
                 main(args)
+            self.assertEqual(copied.export_pen(writer), source)
 
-    def test_transfer_conflict_preserves_destination(self):
+    def test_transfer_refuses_conflicts_before_copying(self):
+        self.seed_transfer()
+        for bad in ('occupied', 'foreign', 'duplicate', 'invalid encoding'):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as dest:
+                writer = 'alpha'
+                copied = LocalFilesPenStore(dest)
+                source = self.store.export_pen(writer)
+                if bad == 'occupied':
+                    copied.write(writer, 'notes', 'destination-only')
+                elif bad == 'foreign':
+                    source[-1]['versions'][0]['writer'] = 'beta'
+                elif bad == 'duplicate':
+                    source.append(source[0])
+                else:
+                    source[-1]['versions'][0]['body'] = chr(0xD800)
+                before = copied.export_pen(writer)
+                with self.assertRaises(ValueError):
+                    copied.import_pen(writer, source)
+                self.assertEqual(copied.export_pen(writer), before)
+
+    def test_transfer_verifies_destination_snapshot(self):
         self.seed_transfer()
         with tempfile.TemporaryDirectory() as dest:
-            copied = LocalFilesPenStore(dest)
-            copied.core_write('alpha', 'different document', 0)
-            before = copied.export_pen('alpha')
-            with self.assertRaisesRegex(ValueError, 'destination conflicts'):
-                copied.import_pen('alpha', self.store.export_pen('alpha'))
-            self.assertEqual(copied.export_pen('alpha'), before)
+            stderr = io.StringIO()
+            with mock.patch.object(LocalFilesPenStore, 'import_pen'), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit):
+                    main(self.transfer_args(dest, 'alpha'))
+            self.assertIn('destination does not match the source snapshot', stderr.getvalue())
 
-    def test_transfer_refuses_occupied_empty_file(self):
+    def test_transfer_accepts_different_entry_order(self):
         self.seed_transfer()
         with tempfile.TemporaryDirectory() as dest:
-            copied = LocalFilesPenStore(dest)
-            occupied = copied.root / 'alpha' / 'journal' / '2026-01-01.md'
-            occupied.parent.mkdir(parents=True)
-            occupied.touch()
-            with self.assertRaisesRegex(ValueError, 'destination conflicts'):
-                copied.import_pen('alpha', self.store.export_pen('alpha'))
-            self.assertEqual(list(copied.root.rglob('*.md')), [occupied])
-            self.assertEqual(occupied.read_bytes(), b'')
+            target = LocalFilesPenStore(dest)
+            source = mock.Mock()
+            source.export_pen.return_value = list(reversed(self.store.export_pen('alpha')))
+            with mock.patch.object(pen_module, 'load_store', side_effect=[source, target]):
+                main(self.transfer_args(dest, 'alpha'))
+            self.assertEqual(target.export_pen('alpha'), self.store.export_pen('alpha'))
+
+    def test_explicit_read_rejects_a_gap_in_version_history(self):
+        id = self.store.write('alpha', 'notes', 'first')
+        self.store.edit('alpha', id, 1, body='second')
+        self.store.edit('alpha', id, 2, body='third')
+        (self.store.root / 'alpha' / 'notes' / id / '2.md').unlink()
+        with self.assertRaisesRegex(ValueError, 'invalid version history'):
+            self.store.read('alpha', id, version=3)
 
     def test_record_writes_and_delete_are_atomic(self):
         writer = 'alpha'
-        journal = self.store.append(writer, {'body': 'original'})
-        spine = self.store.spine_write(writer, 'title', 'original')
-        self.store.core_write(writer, 'original', 0)
-        self.store.marrow_write(writer, 'original', 0, [spine])
-        root = Path(self.tmp.name) / 'pen'
+        id = self.store.write(writer, 'notes', 'original')
+        self.store.edit(writer, id, 1, body='second')
+        root = self.store.root
         def files():
             return {path.relative_to(root): path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
         before = files()
         operations = [
-            ('journal append', self.store.append, ({'body': 'new'},)),
-            ('journal edit', self.store.edit, (journal, 'new')),
-            ('core write', self.store.core_write, ('new', 1)),
-            ('spine write', self.store.spine_write, ('new', 'new')),
-            ('spine edit', self.store.spine_edit, (spine, 'new', 'new', True)),
-            ('spine delete', self.store.spine_delete, (spine,)),
-            ('marrow write', self.store.marrow_write, ('new', 1, [spine])),
+            (self.store.write, ('new', 'body')),
+            (self.store.edit, (id, 2, 'new')),
+            (self.store.delete, (id,)),
         ]
-        for name, operation, args in operations:
-            with self.subTest(operation=name):
-                with mock.patch('engine.pen.os.replace', side_effect=OSError('simulated write failure')) as replace:
-                    with self.assertRaisesRegex(OSError, 'simulated write failure'):
-                        operation(writer, *args)
-                    replace.assert_called_once()
-                self.assertEqual(files(), before)
+        real_replace = os.replace
+
+        def fail_publish(source, target):
+            if Path(target).parent.name.startswith('.pen-'):
+                return real_replace(source, target)
+            raise OSError('simulated rename failure')
+
+        for operation, args in operations:
+            for replace in (mock.Mock(side_effect=OSError('simulated rename failure')), fail_publish):
+                with self.subTest(operation=operation.__name__):
+                    with mock.patch('engine.pen.os.replace', side_effect=replace):
+                        with self.assertRaisesRegex(OSError, 'simulated rename failure'):
+                            operation(writer, *args)
+                    self.assertEqual(files(), before)
+                    self.assertFalse(list(root.rglob('.pen-*')))
 
     def test_http_binds_each_key(self):
         http_server = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
@@ -257,138 +252,143 @@ class PenTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 return json.loads(response.read())['result']
             finally: conn.close()
-        self.seed_transfer()
-        a_key = 'a' * 32
-        b_key = 'b' * 32
-        journal = self.store.recent('beta', 1)[0]['id']
-        spine = self.store.spine_read('beta')[0]['id']
-        # Version 4 exists only for beta. Versions 1–3 exist under both keys.
-        self.store.core_write('beta', 'beta only', 3)
-        self.store.marrow_write('beta', 'beta only', 3, [spine])
+        a_key, b_key = 'a' * 32, 'b' * 32
+        id = self.store.write('beta', 'private-notes', 'Beta only')
+        own = self.store.write('alpha', 'notes', 'Alpha only')
         before = self.store.export_pen('beta')
-
         cases = [
-            ('journal_write', {'body': 'alpha new'}, False),
-            ('journal_edit', {'id': journal, 'body': 'overwrite'}, True),
-            ('journal_read', {'id': journal}, True),
-            ('journal_read', {'date': '2026-01-01'}, False),
-            ('journal_recent', {}, False),
-            ('core_read', {'version': 4}, True),
-            ('core_read', {}, False),
-            ('core_write', {'text': 'alpha core', 'based_on': 3}, False),
-            ('core_history', {}, False),
-            ('spine_write', {'title': 'new', 'body': 'alpha new'}, False),
-            ('spine_edit', {'id': spine, 'body': 'overwrite'}, True),
-            ('spine_delete', {'id': spine}, True),
-            ('spine_read', {'id': spine}, True),
-            ('spine_read', {}, False),
-            ('marrow_read', {'version': 4}, True),
-            ('marrow_read', {}, False),
-            ('marrow_write', {'text': 'alpha marrow', 'based_on': 3, 'spine_ids': []}, False),
-            ('marrow_history', {}, False),
+            ('pen_collections', {}),
+            ('pen_write', {'collection': 'private-notes', 'body': 'Alpha only'}),
+            ('pen_edit', {'id': id, 'based_on': 1, 'body': 'Changed'}),
+            ('pen_read', {'id': id, 'version': 1}),
+            ('pen_list', {'collection': 'private-notes'}),
+            ('pen_history', {'id': id}),
+            ('pen_delete', {'id': id}),
         ]
-        self.assertEqual({name for name, _, _ in cases}, {tool['name'] for tool in server.PEN_TOOLS})
-        for name, args, refused in cases:
-            with self.subTest(tool=name, args=args):
+        self.assertEqual({name for name, _ in cases}, {tool['name'] for tool in server.PEN_TOOLS})
+        for name, args in cases:
+            with self.subTest(tool=name):
                 spoofed = call(a_key, name, dict(args, writer='beta'))
                 self.assertTrue(spoofed['isError'])
                 self.assertEqual(spoofed['content'][0]['text'], 'unknown argument')
+                self.assertTrue(call('c' * 32, name, args)['isError'])
                 result = call(a_key, name, args)
-                self.assertEqual(result['isError'], refused, result)
-                if not refused:
+                if 'id' in args:
+                    self.assertTrue(result['isError'])
+                    self.assertFalse(call(a_key, name, dict(args, id=own))['isError'])
+                else:
+                    self.assertFalse(result['isError'])
                     value = json.loads(result['content'][0]['text'])
-                    if name == 'journal_write':
-                        self.assertEqual(self.store.read('alpha', value['id'])['body'], 'alpha new')
-                    elif name == 'spine_write':
-                        self.assertEqual(self.store.spine_read('alpha', value['id'])['body'], 'alpha new')
-                    elif name in ('core_write', 'marrow_write'):
-                        self.assertEqual(value['number'], 4)
-                        read = getattr(self.store, name.replace('_write', '_read'))
-                        self.assertEqual(read('alpha', 4)['text'], args['text'])
+                    if name == 'pen_collections':
+                        self.assertEqual(value, [{'collection': 'notes', 'count': 1, 'by_day': False}])
+                    elif name == 'pen_write':
+                        self.assertEqual(self.store.read('alpha', value['id'])['body'], 'Alpha only')
                     else:
-                        records = value if isinstance(value, list) else [value]
-                        self.assertTrue(records)
-                        self.assertTrue(all(record['writer'] == 'alpha' for record in records))
+                        self.assertTrue(all(record['writer'] == 'alpha' for record in value))
                 self.assertEqual(self.store.export_pen('beta'), before)
-        self.assertFalse(call(b_key, 'spine_read', {'id': spine})['isError'])
-        self.assertTrue(call('c' * 32, 'journal_recent', {})['isError'])
+        self.assertFalse(call(b_key, 'pen_read', {'id': id})['isError'])
 
     def test_extraction_refuses_case_alias_of_pen(self):
-        self.store.append('alpha', {'body': 'entry'})
+        self.store.write('alpha', 'notes', 'entry')
         root = Path(self.tmp.name)
         if not (root / 'PEN').exists() or not (root / 'PEN').samefile(root / 'pen'):
             self.skipTest('test filesystem is case-sensitive')
         with self.assertRaisesRegex(ValueError, 'outside the pen folder'):
-            server.inside_root('PEN/alpha/journal/new-output')
+            server.inside_root('PEN/alpha/notes/new-output')
 
     def test_extraction_refuses_symlink_into_pen(self):
-        self.store.append('alpha', {'body': 'entry'})
+        self.store.write('alpha', 'notes', 'entry')
         root = Path(self.tmp.name).resolve()
         (root / 'alias').symlink_to(root / 'pen' / 'alpha', target_is_directory=True)
         with self.assertRaisesRegex(ValueError, 'outside the pen folder'):
-            server.inside_root('alias/journal/new-output')
+            server.inside_root('alias/notes/new-output')
         self.assertEqual(server.inside_root('new-output'), str(root / 'new-output'))
 
         # The resolved path need not contain a component spelled "pen".
         (root / 'pen').rename(root / 'storage')
         (root / 'pen').symlink_to(root / 'storage', target_is_directory=True)
         with self.assertRaisesRegex(ValueError, 'outside the pen folder'):
-            server.inside_root('storage/alpha/journal/new-output')
+            server.inside_root('storage/alpha/notes/new-output')
 
     def test_extraction_reserves_pen_name_before_first_write(self):
         for spelling in ('pen', 'PEN'):
             with self.assertRaisesRegex(ValueError, 'outside the pen folder'):
                 server.inside_root(spelling + '/new-output')
 
-    def test_local_store_refuses_writer_directory_alias(self):
-        self.store.spine_write('Alpha', 'title', 'original')
+    def test_local_store_refuses_directory_aliases(self):
+        self.store.write('Alpha', 'Notes', 'original')
         if not (self.store.root / 'alpha').exists():
             self.skipTest('test filesystem is case-sensitive')
-        before = self.store.export_pen('Alpha')
         with self.assertRaises(ValueError):
-            self.store.spine_write('alpha', 'title', 'other')
-        self.assertEqual(self.store.export_pen('Alpha'), before)
-
-    def test_atomic_failure_and_unknown_header(self):
-        id = self.store.append('alpha', {'body': 'old'})
-        path = Path(self.tmp.name) / 'pen/alpha/journal/2026-01-02.md'
-        text = path.read_text().replace('"writer": "alpha"', '"writer": "alpha", "future": "kept"')
-        path.write_text(text)
-        with mock.patch('engine.pen.os.replace', side_effect=OSError('failure')):
-            with self.assertRaises(OSError): self.store.edit('alpha', id, 'new')
-        self.assertEqual(path.read_text(), text)
-        self.assertEqual(list(path.parent.glob('.pen-*')), [])
-        self.store.edit('alpha', id, 'new')
-        self.assertEqual(self.store.read('alpha', id)['future'], 'kept')
+            self.store.write('alpha', 'Notes', 'other')
+        with self.assertRaises(ValueError):
+            self.store.write('Alpha', 'notes', 'other')
 
     def test_body_roundtrip_and_corrupt_header_refused(self):
-        body = 'line\r\nsecond\rthird\n## pen-entry {bad}\n\\escaped\n'
-        id = self.store.append('alpha', {'body': body})
+        body = 'line\r\nsecond\rthird\n## pen-entry {bad}\n\\escaped'
+        id = self.store.write('alpha', 'notes', body)
         self.assertEqual(self.store.read('alpha', id)['body'], body)
-        path = Path(self.tmp.name) / 'pen/alpha/journal/2026-01-02.md'
-        with path.open('a') as f: f.write('## pen-entry {bad}\n')
+        path = self.store.root / 'alpha' / 'notes' / id / '1.md'
+        path.write_text('## pen-entry {bad}\nBody')
         before = path.read_bytes()
-        with self.assertRaises(ValueError): self.store.edit('alpha', id, 'x')
+        with self.assertRaises(ValueError):
+            self.store.edit('alpha', id, 1, body='x')
         self.assertEqual(path.read_bytes(), before)
 
     def test_symlinks_refused(self):
-        self.store.append('beta', {'body': 'b'})
-        alpha = Path(self.tmp.name) / 'pen/alpha'
-        alpha.symlink_to(Path(self.tmp.name) / 'pen/beta', target_is_directory=True)
-        with self.assertRaises(ValueError): self.store.append('alpha', {'body': 'x'})
+        id = self.store.write('beta', 'notes', 'Beta')
+        folder = self.store.root / 'beta' / 'notes'
+        alpha = self.store.root / 'alpha'
+        alpha.symlink_to(folder.parent, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.store.write('alpha', 'notes', 'x')
         alpha.unlink()
-        directory = alpha / 'journal'
-        directory.mkdir(parents=True)
-        (directory / '2026-01-02.md').symlink_to(Path(self.tmp.name) / 'pen/beta/journal/2026-01-02.md')
-        with self.assertRaises(ValueError): self.store.append('alpha', {'body': 'x'})
+        alpha.mkdir()
+        (alpha / 'notes').symlink_to(folder, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.store.write('alpha', 'notes', 'x')
+        (alpha / 'notes').unlink()
+        own = self.store.write('alpha', 'notes', 'Alpha')
+        version = alpha / 'notes' / own / '1.md'
+        version.unlink()
+        version.symlink_to(folder / id / '1.md')
+        with self.assertRaises(ValueError):
+            self.store.read('alpha', own)
 
     def test_concurrent_processes_do_not_lose_entries(self):
         processes = [multiprocessing.Process(target=append_many, args=(self.tmp.name,)) for _ in range(3)]
-        for process in processes: process.start()
+        for process in processes:
+            process.start()
         for process in processes:
             process.join(10)
             self.assertEqual(process.exitcode, 0)
-        self.assertEqual(len(self.store.day('parallel', '2026-01-01')), 36)
+        self.assertEqual(len(self.store.list('parallel', 'notes', day='2026-01-01', limit=40)), 36)
+
+    def test_concurrent_edits_accept_exactly_one_base(self):
+        id = self.store.write('parallel', 'notes', 'original')
+        start, outcomes = multiprocessing.Event(), multiprocessing.Queue()
+        self.addCleanup(outcomes.close)
+        processes = [multiprocessing.Process(target=race_edit, args=(self.tmp.name, id, body, start, outcomes))
+                     for body in ('first edit', 'second edit')]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
+        self.assertCountEqual([outcomes.get(timeout=2) for _ in processes], [2, 'version conflict'])
+        self.assertEqual([r['version'] for r in self.store.history('parallel', id)], [1, 2])
+
+    def test_windows_lock_releases_the_same_byte_on_failed_write(self):
+        windows = mock.Mock(LK_LOCK=1, LK_UNLCK=2)
+        with mock.patch.object(pen_module, 'fcntl', None), mock.patch.object(pen_module, 'msvcrt', windows, create=True):
+            with mock.patch.object(pen_module.os, 'replace', side_effect=OSError('write failed')):
+                with self.assertRaisesRegex(OSError, 'write failed'):
+                    self.store.write('alpha', 'notes', 'entry')
+        fd = windows.locking.call_args_list[0].args[0]
+        self.assertEqual(windows.locking.call_args_list, [mock.call(fd, 1, 1), mock.call(fd, 2, 1)])
+        with self.assertRaises(OSError):
+            os.fstat(fd)
 
     def test_store_reference_and_duplicate_key_binding(self):
         module = type(sys)('pen_fixture')
@@ -402,29 +402,20 @@ class PenTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             server.configure(self.tmp.name, 'c' * 32, {'TEST_PEN_A_KEY': 'Alpha', 'TEST_PEN_B_KEY': 'alpha'})
 
-    def test_journal_only_store_keeps_its_tools(self):
-        class JournalStore(PenStore):
-            append = self.store.append
-            edit = self.store.edit
-            read = self.store.read
-            day = self.store.day
-            recent = self.store.recent
-
+    def test_incomplete_custom_store_refused(self):
         module = type(sys)('pen_fixture')
-        module.store = JournalStore
+        module.store = PenStore
         with mock.patch.dict(sys.modules, {'pen_fixture': module}):
-            server.configure(self.tmp.name, 'c' * 32, {'TEST_PEN_A_KEY': 'alpha'}, 'pen_fixture:store')
-        tools = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})['result']['tools']
-        self.assertEqual([tool['name'] for tool in tools],
-                         ['write_memories', 'write_people', 'journal_write', 'journal_edit', 'journal_read', 'journal_recent'])
-        self.assertFalse(self.call('alpha', 'journal_write', {'body': 'entry'})[0])
-        result = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-                                'params': {'name': 'core_history'}}, 'alpha')
-        self.assertEqual(result['error']['code'], -32602)
+            with self.assertRaisesRegex(SystemExit, 'lacks required method'):
+                server.configure(self.tmp.name, 'c' * 32, {}, 'pen_fixture:store')
 
     def test_bad_names(self):
         for name in ('', '../x', '.hidden', '-x', 'x/y', 'x\\y', 'x.', 'x ', 'NUL', 'C:'):
-            with self.subTest(name=name), self.assertRaises(ValueError): self.store.append(name, {'body': 'x'})
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.store.write(name, 'notes', 'x')
+                with self.assertRaises(ValueError):
+                    self.store.write('alpha', name, 'x')
 
     def test_extraction_does_not_import_pen(self):
         for name in ('write_memories.py', 'write_people.py', 'found_in_chats.py', 'nightly.py', 'roster.py', 'review.py'):
@@ -434,11 +425,7 @@ class PenTests(unittest.TestCase):
             self.assertFalse(any('pen' in x.split('.') for x in imports), name)
 
     def test_extraction_paths_do_not_touch_pen(self):
-        for writer in ('alpha', 'beta'):
-            self.store.append(writer, {'body': 'fixture'})
-            self.store.core_write(writer, 'core', 0)
-            id = self.store.spine_write(writer, 'title', 'body')
-            self.store.marrow_write(writer, 'marrow', 0, [id])
+        self.seed_transfer()
         folder = Path(self.tmp.name) / 'pen'
         def digest():
             h = hashlib.sha256()
@@ -474,7 +461,7 @@ class PenTests(unittest.TestCase):
         self.assertEqual(sink.write.call_count, 2)
         self.assertEqual(before, digest())
         self.assertEqual(spy.method_calls, [])
-        self.assertTrue(self.call('alpha', 'write_memories', {'export': 'export.json', 'out': 'pen/alpha/journal'})[0])
+        self.assertTrue(self.call('alpha', 'write_memories', {'export': 'export.json', 'out': 'pen/alpha/notes'})[0])
 
 
 if __name__ == '__main__': unittest.main()
