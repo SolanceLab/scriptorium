@@ -1,6 +1,9 @@
 ---
 name: pen-writing
-description: Use when writing or revising a hand-written entry in Scriptorium so it can be found again later.
+description: >-
+  Use when writing, pinning or revising an entry in one of your own collections in the
+  Scriptorium pen (hand-written records such as a journal, reflections, lessons or a summary),
+  so it can be found again later. Not for extracting memories from chat exports.
 ---
 
 # Writing in Scriptorium

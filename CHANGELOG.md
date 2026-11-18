@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+The pen: your AI can now keep records of its own, written by hand. A writer owns named collections of entries (a journal, reflections, lessons, a summary, whatever it chooses). Every entry keeps its version history, can be pinned, and a delete sets it aside with its history instead of erasing it; a collection can group its entries by day. Seven tools: `pen_collections`, `pen_write`, `pen_edit`, `pen_read`, `pen_list`, `pen_history`, `pen_delete` (docs/pen.md).
+
+Writers: each server key belongs to exactly one writer, so an AI can only read and write its own pen, whatever a tool call says (docs/writers.md). The pen is never filled from chat exports: the memory and people tools cannot reach it, and tests prove it. Your own store: the pen has its own `PenStore` seam (docs/your-own-store.md), and `python3 engine/pen.py transfer` moves a writer's whole pen between stores, resuming without duplicates if it stops halfway.
+
+A new skill, pen-writing, tells the AI how to write entries it can find again later. Works on Windows too (file locking falls back to msvcrt).
+
 ## 1.2.2
 
 The People page shows the facts the nightly run set aside to check by hand, in its Suggestions box, with the reason and the words they came from. Accept adds the fact to the person's facts; Dismiss drops it; the choice is kept in `held_decided.json` so it never comes back. `review.py` has the same as commands (`held`, `keep-held ID`, `drop-held ID`). A host's own API may send these as suggestions of `kind: 'fact'` (dashboard/HOST.md).
