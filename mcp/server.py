@@ -13,6 +13,7 @@ write, for running another provider or a local model.
 """
 import argparse
 import hmac
+import importlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import threading
 import urllib.parse
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -75,9 +77,19 @@ TOOLS = [
 ]
 
 
+PEN_TOOLS = [
+    {"name": "journal_write", "description": "Write a journal entry.", "inputSchema": {"type": "object", "properties": {"body": {"type": "string"}, "title": {"type": "string"}}, "required": ["body"], "additionalProperties": False}},
+    {"name": "journal_edit", "description": "Edit a journal entry.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "body": {"type": "string"}}, "required": ["id", "body"], "additionalProperties": False}},
+    {"name": "journal_read", "description": "Read an entry by id or a day's entries by date.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "date": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "journal_recent", "description": "Read recent entries, newest first.", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}, "additionalProperties": False}},
+]
+
 class Config:
     root = None
     key = ""
+    keys = {}
+    pen = None
+    key_refs = set()
 
 
 def inside_root(path, must_exist=None):
@@ -87,6 +99,9 @@ def inside_root(path, must_exist=None):
     p = os.path.realpath(os.path.join(Config.root, os.path.expanduser(path)))
     if os.path.commonpath([p, Config.root]) != Config.root:
         raise ValueError(f"{path!r} is outside the server's folder")
+    pen_root = os.path.join(Config.root, "pen")
+    if os.path.commonpath([p, pen_root]) == pen_root:
+        raise ValueError("extraction paths must stay outside the pen folder")
     if must_exist == "file" and not os.path.isfile(p):
         raise ValueError(f"{path!r} is not a file")
     if must_exist == "file" and os.path.getsize(p) > MAX_EXPORT:
@@ -153,7 +168,10 @@ def run_tool(name, args):
     if not _one_write.acquire(blocking=False):
         return "another write is running; try again when it finishes", True
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=Config.root)
+        child_env = os.environ.copy()
+        for ref in Config.key_refs | {"SCRIPTORIUM_MCP_KEY", "MEMORY_ENTRY_MCP_KEY", "SCRIPTORIUM_WRITERS", "MEMORY_ENTRY_WRITERS"}:
+            child_env.pop(ref, None)
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=Config.root, env=child_env)
     finally:
         _one_write.release()
     lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
@@ -169,7 +187,33 @@ def _error(rid, code, message):
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
-def handle(msg):
+def pen_tool(name, args, writer):
+    if writer is None:
+        return "no writer is assigned to this key", True
+    allowed = {"journal_write": {"body", "title"}, "journal_edit": {"id", "body"},
+               "journal_read": {"id", "date"}, "journal_recent": {"n"}}
+    if set(args) - allowed[name]:
+        return "unknown argument", True
+    if not _one_write.acquire(blocking=False):
+        return "another write is running; try again when it finishes", True
+    try:
+        store = Config.pen
+        if name == "journal_write": result = {"id": store.append(writer, args)}
+        elif name == "journal_edit":
+            store.edit(writer, args.get("id"), args.get("body"))
+            result = {"ok": True}
+        elif name == "journal_read":
+            if ("id" in args) == ("date" in args): raise ValueError("provide exactly one of id or date")
+            result = store.read(writer, args["id"]) if "id" in args else store.day(writer, args["date"])
+        else: result = store.recent(writer, args.get("n", 5))
+        return json.dumps(result, ensure_ascii=False), False
+    except (ValueError, OSError) as e:
+        return str(e), True
+    finally:
+        _one_write.release()
+
+
+def handle(msg, writer=None):
     """One JSON-RPC message -> its response dict, or None for a notification."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
         return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
@@ -186,15 +230,15 @@ def handle(msg):
     if method == "ping":
         return _result(rid, {})
     if method == "tools/list":
-        return _result(rid, {"tools": TOOLS})
+        return _result(rid, {"tools": TOOLS + PEN_TOOLS})
     if method == "tools/call":
         name = params.get("name")
-        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS}:
+        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS + PEN_TOOLS}:
             return _error(rid, -32602, f"unknown tool: {name}")
         args = params["arguments"] if "arguments" in params else {}
         if not isinstance(args, dict):
             return _error(rid, -32602, "arguments must be an object")
-        text, is_error = run_tool(name, args)
+        text, is_error = pen_tool(name, args, writer) if name.startswith("journal_") else run_tool(name, args)
         return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
     return _error(rid, -32601, f"method not found: {method}")
 
@@ -235,7 +279,12 @@ class Handler(BaseHTTPRequestHandler):
         if urllib.parse.urlparse(self.path).path != "/mcp":
             return self._send(404, {"error": "not found"})
         got = self.headers.get("Authorization") or ""
-        if not hmac.compare_digest(got.encode(), f"Bearer {Config.key}".encode()):
+        authenticated = False
+        writer = None
+        for key, bound_writer in Config.keys.items():
+            if hmac.compare_digest(got.encode(), f"Bearer {key}".encode()):
+                authenticated, writer = True, bound_writer
+        if not authenticated:
             return self._send(401, {"error": "unauthorized"})
         if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
             return self._send(415, {"error": "Content-Type must be application/json"})
@@ -251,13 +300,13 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body, list):
             if not body:
                 return self._send(400, _error(None, -32600, "empty batch"))
-            answers = [a for a in (handle(m) for m in body) if a is not None]
+            answers = [a for a in (handle(m, writer) for m in body) if a is not None]
             return self._send(202) if not answers else self._send(200, answers)
-        answer = handle(body)
+        answer = handle(body, writer)
         return self._send(202) if answer is None else self._send(200, answer)
 
 
-def configure(root, key):
+def configure(root, key, writers=None, pen_ref=None, timezone=None):
     """Validate the settings; raise SystemExit with a plain reason when the server must not start."""
     if not key or len(key) < 16:
         raise SystemExit("refusing to start: set SCRIPTORIUM_MCP_KEY to a random key of at least 16 characters")
@@ -269,6 +318,37 @@ def configure(root, key):
     if real == os.path.realpath(os.path.expanduser("~")) or real == os.path.sep:
         raise SystemExit("refusing to start: --root must be a dedicated folder, not your home folder or /")
     Config.root, Config.key = real, key
+    Config.keys = {key: None}
+    sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
+    from engine.pen import LocalFilesPenStore, validate_writer
+    writers = {} if writers is None else writers
+    if not isinstance(writers, dict): raise SystemExit("writers must be an object mapping environment key references to writers")
+    Config.key_refs = set(writers)
+    writer_names = {}
+    for ref, writer in writers.items():
+        if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ref): raise SystemExit("invalid key reference")
+        secret = os.environ.get(ref, "")
+        if len(secret) < 16: raise SystemExit("writer key must be set and at least 16 characters")
+        try: validate_writer(writer)
+        except ValueError as e: raise SystemExit(str(e))
+        normalized = unicodedata.normalize("NFD", writer).casefold()
+        if normalized in writer_names and writer_names[normalized] != writer: raise SystemExit("writer names collide on case-insensitive filesystems")
+        writer_names[normalized] = writer
+        if secret in Config.keys and Config.keys[secret] not in (None, writer): raise SystemExit("one key cannot map to multiple writers")
+        Config.keys[secret] = writer
+    if pen_ref:
+        mod, sep, attr = pen_ref.partition(":")
+        if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
+        try:
+            store = getattr(importlib.import_module(mod), attr)
+            needs = ("append", "edit", "read", "day", "recent")
+            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in needs)): store = store()
+            if not all(callable(getattr(store, n, None)) for n in needs): raise ValueError("pen store lacks a journal method")
+            Config.pen = store
+        except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))
+    else:
+        try: Config.pen = LocalFilesPenStore(real, timezone)
+        except (ValueError, KeyError) as e: raise SystemExit("invalid pen timezone: " + str(e))
 
 
 def main(argv=None):
@@ -276,7 +356,9 @@ def main(argv=None):
     ap.add_argument("--root", required=True, help="the one folder the tools may read and write")
     ap.add_argument("--port", type=int, default=8795)
     a = ap.parse_args(argv)
-    configure(a.root, (_env("MCP_KEY") or ""))
+    try: writers = json.loads(_env("WRITERS") or "{}")
+    except ValueError: raise SystemExit("SCRIPTORIUM_WRITERS must be a JSON object")
+    configure(a.root, (_env("MCP_KEY") or ""), writers, _env("PEN_STORE"), _env("PEN_TZ"))
     # each request on its own thread, so a refused or checked request is answered while a write runs;
     # _one_write still lets only one write run at a time
     server = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)

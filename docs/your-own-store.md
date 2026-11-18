@@ -27,3 +27,7 @@ If your messages carry the author's account id (`sender_id`), a card can list `i
 - an id that no card knows ties the message to no one, because a shown name can be anyone's.
 
 Ids are used for matching only and are never sent to the model. The exact shapes are in `CONTRACT.md`.
+
+## Pen store
+
+Set `SCRIPTORIUM_PEN_STORE` to an importable `module:attr` naming an object, class, or zero-argument factory. It must provide `append(writer, entry) -> id`, `edit(writer, id, text)`, `read(writer, id)`, `day(writer, date)`, and `recent(writer, n)`; the last returns newest first. Entries passed to append contain `body` and optionally `title`; reads return dictionaries with at least `id`, `time`, `writer`, and `body`. The store must enforce writer isolation itself. Without this setting the local-files store is used. Configure keys and writers as in [writers.md](writers.md).
