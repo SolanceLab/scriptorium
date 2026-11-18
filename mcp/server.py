@@ -23,6 +23,7 @@ import threading
 import urllib.parse
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/.
@@ -84,11 +85,30 @@ PEN_TOOLS = [
     {"name": "journal_recent", "description": "Read recent entries, newest first.", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}, "additionalProperties": False}},
 ]
 
+for _name, _properties, _required in [
+    ("core_read", {"version": {"type": "integer", "minimum": 1}}, []),
+    ("core_write", {"text": {"type": "string"}, "based_on": {"type": "integer", "minimum": 0}}, ["text", "based_on"]),
+    ("core_history", {}, []),
+]:
+    PEN_TOOLS.append({"name": _name, "description": _name.replace("_", " "), "inputSchema": {"type": "object", "properties": _properties, "required": _required, "additionalProperties": False}})
+
+for _name, _properties, _required in [
+    ("spine_write", {"title": {"type": "string"}, "body": {"type": "string"}, "pinned": {"type": "boolean"}}, ["title", "body"]),
+    ("spine_edit", {"id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "pinned": {"type": "boolean"}}, ["id"]),
+    ("spine_delete", {"id": {"type": "string"}}, ["id"]),
+    ("spine_read", {"id": {"type": "string"}}, []),
+    ("marrow_read", {"version": {"type": "integer", "minimum": 1}}, []),
+    ("marrow_write", {"text": {"type": "string"}, "based_on": {"type": "integer"}, "spine_ids": {"type": "array", "items": {"type": "string"}}}, ["text", "based_on", "spine_ids"]),
+    ("marrow_history", {}, []),
+]:
+    PEN_TOOLS.append({"name": _name, "description": _name.replace("_", " "), "inputSchema": {"type": "object", "properties": _properties, "required": _required, "additionalProperties": False}})
+
 class Config:
     root = None
     key = ""
     keys = {}
     pen = None
+    pen_tools = PEN_TOOLS
     key_refs = set()
 
 
@@ -96,12 +116,25 @@ def inside_root(path, must_exist=None):
     """The real path when it sits inside the root (links followed), else raise ValueError."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError("a path is required")
-    p = os.path.realpath(os.path.join(Config.root, os.path.expanduser(path)))
+    try:
+        candidate = (Path(Config.root) / os.path.expanduser(path)).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise ValueError("cannot resolve extraction path") from e
+    p = str(candidate)
     if os.path.commonpath([p, Config.root]) != Config.root:
         raise ValueError(f"{path!r} is outside the server's folder")
-    pen_root = os.path.join(Config.root, "pen")
-    if os.path.commonpath([p, pen_root]) == pen_root:
-        raise ValueError("extraction paths must stay outside the pen folder")
+    pen_root = Path(Config.root) / "pen"
+    for ancestor in (candidate, *candidate.parents):
+        try:
+            in_pen = ancestor.samefile(pen_root)
+        except (FileNotFoundError, NotADirectoryError):
+            in_pen = False
+        except OSError as e:
+            raise ValueError("cannot verify extraction path") from e
+        # Reserve the top-level pen name consistently, including before the first write.
+        reserved = ancestor.parent == pen_root.parent and ancestor.name.casefold() == "pen"
+        if in_pen or reserved:
+            raise ValueError("extraction paths must stay outside the pen folder")
     if must_exist == "file" and not os.path.isfile(p):
         raise ValueError(f"{path!r} is not a file")
     if must_exist == "file" and os.path.getsize(p) > MAX_EXPORT:
@@ -191,7 +224,7 @@ def pen_tool(name, args, writer):
     if writer is None:
         return "no writer is assigned to this key", True
     allowed = {"journal_write": {"body", "title"}, "journal_edit": {"id", "body"},
-               "journal_read": {"id", "date"}, "journal_recent": {"n"}}
+               "journal_read": {"id", "date"}, "journal_recent": {"n"}, "core_read": {"version"}, "core_write": {"text", "based_on"}, "core_history": set(), "spine_write": {"title", "body", "pinned"}, "spine_edit": {"id", "title", "body", "pinned"}, "spine_delete": {"id"}, "spine_read": {"id"}, "marrow_read": {"version"}, "marrow_write": {"text", "based_on", "spine_ids"}, "marrow_history": set()}
     if set(args) - allowed[name]:
         return "unknown argument", True
     if not _one_write.acquire(blocking=False):
@@ -205,7 +238,21 @@ def pen_tool(name, args, writer):
         elif name == "journal_read":
             if ("id" in args) == ("date" in args): raise ValueError("provide exactly one of id or date")
             result = store.read(writer, args["id"]) if "id" in args else store.day(writer, args["date"])
-        else: result = store.recent(writer, args.get("n", 5))
+        elif name == "journal_recent": result = store.recent(writer, args.get("n", 5))
+        elif name == "core_read": result = store.core_read(writer, args.get("version"))
+        elif name == "core_write": result = {"number": store.core_write(writer, args.get("text"), args.get("based_on"))}
+        elif name == "core_history": result = store.core_history(writer)
+        elif name == "spine_write": result = {"id": store.spine_write(writer, args.get("title"), args.get("body"), args.get("pinned", False))}
+        elif name == "spine_edit":
+            store.spine_edit(writer, args.get("id"), args.get("title"), args.get("body"), args.get("pinned"))
+            result = {"ok": True}
+        elif name == "spine_delete":
+            store.spine_delete(writer, args.get("id"))
+            result = {"ok": True}
+        elif name == "spine_read": result = store.spine_read(writer, args.get("id"))
+        elif name == "marrow_read": result = store.marrow_read(writer, args.get("version"))
+        elif name == "marrow_write": result = {"number": store.marrow_write(writer, args.get("text"), args.get("based_on"), args.get("spine_ids"))}
+        else: result = store.marrow_history(writer)
         return json.dumps(result, ensure_ascii=False), False
     except (ValueError, OSError) as e:
         return str(e), True
@@ -230,15 +277,15 @@ def handle(msg, writer=None):
     if method == "ping":
         return _result(rid, {})
     if method == "tools/list":
-        return _result(rid, {"tools": TOOLS + PEN_TOOLS})
+        return _result(rid, {"tools": TOOLS + Config.pen_tools})
     if method == "tools/call":
         name = params.get("name")
-        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS + PEN_TOOLS}:
+        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS + Config.pen_tools}:
             return _error(rid, -32602, f"unknown tool: {name}")
         args = params["arguments"] if "arguments" in params else {}
         if not isinstance(args, dict):
             return _error(rid, -32602, "arguments must be an object")
-        text, is_error = pen_tool(name, args, writer) if name.startswith("journal_") else run_tool(name, args)
+        text, is_error = pen_tool(name, args, writer) if name in {t["name"] for t in Config.pen_tools} else run_tool(name, args)
         return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
     return _error(rid, -32601, f"method not found: {method}")
 
@@ -320,7 +367,7 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
     Config.root, Config.key = real, key
     Config.keys = {key: None}
     sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
-    from engine.pen import LocalFilesPenStore, validate_writer
+    from engine.pen import LocalFilesPenStore, PenStore, validate_writer
     writers = {} if writers is None else writers
     if not isinstance(writers, dict): raise SystemExit("writers must be an object mapping environment key references to writers")
     Config.key_refs = set(writers)
@@ -341,12 +388,24 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
         if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
         try:
             store = getattr(importlib.import_module(mod), attr)
-            needs = ("append", "edit", "read", "day", "recent")
-            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in needs)): store = store()
-            if not all(callable(getattr(store, n, None)) for n in needs): raise ValueError("pen store lacks a journal method")
+            journal = ("append", "edit", "read", "day", "recent")
+            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in journal)):
+                store = store()
+
+            def implements(name):
+                method = getattr(store, name, None)
+                return callable(method) and getattr(method, "__func__", method) is not getattr(PenStore, name, None)
+
+            if not all(implements(name) for name in journal):
+                raise ValueError("pen store lacks a required journal method")
+            Config.pen_tools = [
+                tool for tool in PEN_TOOLS
+                if tool["name"].startswith("journal_") or implements(tool["name"])
+            ]
             Config.pen = store
         except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))
     else:
+        Config.pen_tools = PEN_TOOLS
         try: Config.pen = LocalFilesPenStore(real, timezone)
         except (ValueError, KeyError) as e: raise SystemExit("invalid pen timezone: " + str(e))
 
