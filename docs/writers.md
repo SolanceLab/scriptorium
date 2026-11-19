@@ -1,7 +1,9 @@
 # Writers
 
-Each authenticated key has at most one writer. Set `SCRIPTORIUM_WRITERS` to a JSON object mapping environment variable names containing keys to writer names, for example `{"FIRST_KEY":"first","SECOND_KEY":"second"}`. Set each referenced variable to a distinct secret of at least 16 characters. The existing `SCRIPTORIUM_MCP_KEY` remains required and can also be referenced; an authenticated key without a writer can use extraction tools but cannot use pen tools. Never put real keys in configuration examples or tool arguments.
+Writers are now called agents. See [Agents](agents.md) for how a key maps to one agent or to several, and how to set them up.
 
-Writer and collection names follow the same rules. Use names without a leading dot or dash, trailing dot or space, path separators, control characters, Windows-reserved names, or the characters `: * ? " < > |`. Use the same spelling and case when referring to a name. Collection names that differ only by case or Unicode normalization are refused. The server derives the writer from the authenticated key. Each pen tool works within that writer's collections and accepts only its documented arguments.
+`SCRIPTORIUM_WRITERS` and `MEMORY_ENTRY_WRITERS` still work, as before. `SCRIPTORIUM_WRITERS` also accepts a list of agents now.
+
+Agent and collection names follow the same rules. Use names without a leading dot or dash, trailing dot or space, path separators, control characters, Windows-reserved names, or the characters `: * ? " < > |`. Use the same spelling and case when referring to a name. Names that differ only by case or Unicode normalization are refused. The server derives the agent from the authenticated key, or from the `agent` argument when the key is shared, and each pen tool works within that agent's collections.
 
 See [The pen](pen.md) for the seven tools and the transfer command.

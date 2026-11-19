@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0
+
+Shared keys: one key can now belong to several agents (an agent is the role or the identity a model speaks as). On such a key every pen tool takes a required `agent` argument, one of the agents on the key, spelled exactly; each agent's entries stay separate. A key with one agent works exactly as in 1.3.0. New `SCRIPTORIUM_AGENTS` setting (docs/agents.md); `SCRIPTORIUM_WRITERS` still works and now also accepts lists. `MEMORY_ENTRY_WRITERS` counts too: setting either of them together with `SCRIPTORIUM_AGENTS` is refused. A settings value of `null`, a list, a string or a number is now refused at start (1.3.0 let `null` through as extraction only). New `engine/setup_agents.py` writes the settings file; `mcp/count_tools.py` measures what a client sees. The server prints the port it really listens on, so `--port 0` works. Anyone holding a shared key can read, write, edit and delete entries for every agent on it.
+
 ## 1.3.0
 
 The pen: your AI can now keep records of its own, written by hand. A writer owns named collections of entries (a journal, reflections, lessons, a summary, whatever it chooses). Every entry keeps its version history, can be pinned, and a delete sets it aside with its history instead of erasing it; a collection can group its entries by day. Seven tools: `pen_collections`, `pen_write`, `pen_edit`, `pen_read`, `pen_list`, `pen_history`, `pen_delete` (docs/pen.md).

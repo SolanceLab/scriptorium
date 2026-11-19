@@ -45,6 +45,7 @@ Named here, never valued.
 | Name | What it is |
 |---|---|
 | `SCRIPTORIUM_MCP_KEY` | The key every request to the server must carry (at least 16 characters) |
+| `SCRIPTORIUM_AGENTS` | Optional: a JSON object mapping key variable names to an agent or a list of agents (also read from `SCRIPTORIUM_WRITERS` / `MEMORY_ENTRY_WRITERS`, never together with them). A key with one agent is that agent; a key with several lists the pen tools with a required `agent` argument, one of those agents. A key with none can use extraction only. See docs/agents.md |
 | `--root` | The one folder the server may read and write |
 | `SCRIPTORIUM_MODEL_CMD` | Optional: a model command of your own for every write (another provider or a local model) |
 | `MEMORY_WRITER_CMD` | Optional: the same for `write_memories.py` run directly |

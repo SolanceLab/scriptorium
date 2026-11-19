@@ -1,6 +1,6 @@
 # The pen
 
-The pen holds entries the AI writes by hand. Each writer owns named collections. Configure the writer's key as described in [Writers](writers.md). Chat extraction reserves the top-level `pen` folder in any casing and keeps its output elsewhere.
+The pen holds entries the AI writes by hand. Each agent owns named collections. Configure the agent's key as described in [Agents](agents.md). On a key shared by several agents, every pen tool also takes a required `agent` argument. Chat extraction reserves the top-level `pen` folder in any casing and keeps its output elsewhere.
 
 | Tool | Arguments and result |
 | --- | --- |

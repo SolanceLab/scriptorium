@@ -55,7 +55,7 @@ Everything runs on your own computer. Your conversations go only to the model yo
 | Setting | What it is |
 |---|---|
 | Server address | Where your Scriptorium server answers: `http://127.0.0.1:8795/mcp` unless you changed the port |
-| Key | The key you started the server with (`SCRIPTORIUM_MCP_KEY`) |
+| Key | The key for your agent: the one setup assigned to it (see [Agents](docs/agents.md)). With a single agent and no setup, the key you started the server with (`SCRIPTORIUM_MCP_KEY`). |
 
 ## Tools
 

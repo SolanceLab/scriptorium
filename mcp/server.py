@@ -8,10 +8,14 @@ to start without a key; every request must carry `Authorization: Bearer <key>`. 
 inside --root (checked after following links). Over MCP a caller picks a model NAME and the public prompt, never a
 command or a prompt file. One write runs at a time. Standard library only.
 
+SCRIPTORIUM_AGENTS (or its 1.3.0 name, SCRIPTORIUM_WRITERS) maps key variable names to an agent or a list of agents;
+--port 0 picks a free port.
+
 Operator setting (environment, never from a request): SCRIPTORIUM_MODEL_CMD replaces the model command for every
 write, for running another provider or a local model.
 """
 import argparse
+import copy
 import hmac
 import importlib
 import json
@@ -28,6 +32,7 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/.
 MAX_LIMIT = 50
+AGENTS_ENV = "SCRIPTORIUM_AGENTS"
 
 
 def _plugin_version():
@@ -106,6 +111,20 @@ PEN_TOOLS = [
 _PEN_SCHEMAS = {tool["name"]: tool["inputSchema"] for tool in PEN_TOOLS}
 
 
+def _with_agent(tool, agents):
+    """A copy of one pen tool whose schema also requires `agent`, one of the agents on the key."""
+    tool = copy.deepcopy(tool)
+    schema = tool["inputSchema"]
+    schema["properties"] = dict(schema["properties"], agent={
+        "type": "string", "enum": list(agents), "description": "Which agent you speak as."})
+    schema["required"] = list(schema["required"]) + ["agent"]
+    return tool
+
+
+def _shared_pen_tools(agents):
+    return [_with_agent(t, agents) for t in PEN_TOOLS]
+
+
 class Config:
     root = None
     key = ""
@@ -113,6 +132,7 @@ class Config:
     pen = None
     pen_tools = PEN_TOOLS
     key_refs = set()
+    shared_tools = {}     # agent tuple -> the pen tools a key shared by those agents lists
 
 
 def inside_root(path, must_exist=None):
@@ -205,7 +225,7 @@ def run_tool(name, args):
         return "another write is running; try again when it finishes", True
     try:
         child_env = os.environ.copy()
-        for ref in Config.key_refs | {"SCRIPTORIUM_MCP_KEY", "MEMORY_ENTRY_MCP_KEY", "SCRIPTORIUM_WRITERS", "MEMORY_ENTRY_WRITERS"}:
+        for ref in Config.key_refs | {"SCRIPTORIUM_MCP_KEY", "MEMORY_ENTRY_MCP_KEY", "SCRIPTORIUM_WRITERS", "MEMORY_ENTRY_WRITERS", AGENTS_ENV}:
             child_env.pop(ref, None)
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=Config.root, env=child_env)
     finally:
@@ -223,9 +243,19 @@ def _error(rid, code, message):
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
-def pen_tool(name, args, writer):
-    if writer is None:
+def pen_tool(name, args, agents):
+    if agents is None:
         return "no writer is assigned to this key", True
+    if len(agents) == 1:
+        writer = agents[0]
+    else:
+        args = dict(args)
+        if "agent" not in args:
+            return "agent is required: one of " + ", ".join(agents), True
+        agent = args.pop("agent")
+        if not isinstance(agent, str) or agent not in agents:
+            return "agent must be one of " + ", ".join(agents), True
+        writer = agent
     schema = _PEN_SCHEMAS[name]
     properties = schema["properties"]
     if set(args) - properties.keys():
@@ -257,7 +287,10 @@ def pen_tool(name, args, writer):
 
 
 def handle(msg, writer=None):
-    """One JSON-RPC message -> its response dict, or None for a notification."""
+    """One JSON-RPC message -> its response dict, or None for a notification.
+
+    `writer` is what the key is bound to: None, one agent name, or a tuple of agent names."""
+    agents = (writer,) if isinstance(writer, str) else (tuple(writer) if writer else None)
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
         return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
     rid, method = msg.get("id"), msg["method"]
@@ -273,7 +306,8 @@ def handle(msg, writer=None):
     if method == "ping":
         return _result(rid, {})
     if method == "tools/list":
-        return _result(rid, {"tools": TOOLS + Config.pen_tools})
+        pen = (Config.shared_tools.get(agents) or _shared_pen_tools(agents)) if agents and len(agents) > 1 else Config.pen_tools
+        return _result(rid, {"tools": TOOLS + pen})
     if method == "tools/call":
         name = params.get("name")
         if not isinstance(name, str) or name not in {t["name"] for t in TOOLS + Config.pen_tools}:
@@ -281,7 +315,7 @@ def handle(msg, writer=None):
         args = params["arguments"] if "arguments" in params else {}
         if not isinstance(args, dict):
             return _error(rid, -32602, "arguments must be an object")
-        text, is_error = pen_tool(name, args, writer) if name in {t["name"] for t in Config.pen_tools} else run_tool(name, args)
+        text, is_error = pen_tool(name, args, agents) if name in {t["name"] for t in Config.pen_tools} else run_tool(name, args)
         return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
     return _error(rid, -32601, f"method not found: {method}")
 
@@ -367,18 +401,29 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
     writers = {} if writers is None else writers
     if not isinstance(writers, dict): raise SystemExit("writers must be an object mapping environment key references to writers")
     Config.key_refs = set(writers)
+    Config.shared_tools = {}
     writer_names = {}
     for ref, writer in writers.items():
         if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ref): raise SystemExit("invalid key reference")
         secret = os.environ.get(ref, "")
         if len(secret) < 16: raise SystemExit("writer key must be set and at least 16 characters")
-        try: validate_writer(writer)
-        except ValueError as e: raise SystemExit(str(e))
-        normalized = unicodedata.normalize("NFD", writer).casefold()
-        if normalized in writer_names and writer_names[normalized] != writer: raise SystemExit("writer names collide on case-insensitive filesystems")
-        writer_names[normalized] = writer
-        if secret in Config.keys and Config.keys[secret] not in (None, writer): raise SystemExit("one key cannot map to multiple writers")
-        Config.keys[secret] = writer
+        names = [writer] if isinstance(writer, str) else writer
+        if not isinstance(names, list) or not names:
+            raise SystemExit("each key maps to an agent name or a non-empty list of agent names")
+        for name in names:
+            try: validate_writer(name)
+            except ValueError as e: raise SystemExit(str(e))
+        if len(set(names)) != len(names): raise SystemExit("an agent is listed twice on one key")
+        for name in names:
+            # the folded form is only the collision key; the name keeps its own spelling
+            normalized = unicodedata.normalize("NFD", name).casefold()
+            if normalized in writer_names and writer_names[normalized] != name: raise SystemExit("writer names collide on case-insensitive filesystems")
+            writer_names[normalized] = name
+        grant = tuple(names)
+        current = Config.keys.get(secret)
+        if current is None: Config.keys[secret] = grant
+        elif set(current) != set(grant): raise SystemExit("one key cannot map to different agents")
+    Config.shared_tools = {v: _shared_pen_tools(v) for v in Config.keys.values() if v is not None and len(v) > 1}
     if pen_ref:
         mod, sep, attr = pen_ref.partition(":")
         if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
@@ -406,13 +451,20 @@ def main(argv=None):
     ap.add_argument("--root", required=True, help="the one folder the tools may read and write")
     ap.add_argument("--port", type=int, default=8795)
     a = ap.parse_args(argv)
-    try: writers = json.loads(_env("WRITERS") or "{}")
-    except ValueError: raise SystemExit("SCRIPTORIUM_WRITERS must be a JSON object")
+    agents_set, writers_raw = AGENTS_ENV in os.environ, _env("WRITERS")
+    writers_set = "SCRIPTORIUM_WRITERS" in os.environ or "MEMORY_ENTRY_WRITERS" in os.environ
+    if agents_set and writers_set:
+        raise SystemExit("set SCRIPTORIUM_AGENTS or SCRIPTORIUM_WRITERS (or MEMORY_ENTRY_WRITERS), not both")
+    # a set SCRIPTORIUM_AGENTS is read as given, so an empty value is refused instead of falling back
+    raw, label = (os.environ[AGENTS_ENV], AGENTS_ENV) if agents_set else ((writers_raw or "{}"), "SCRIPTORIUM_WRITERS")
+    try: writers = json.loads(raw)
+    except ValueError: raise SystemExit(label + " must be a JSON object")
+    if not isinstance(writers, dict): raise SystemExit(label + " must be a JSON object")
     configure(a.root, (_env("MCP_KEY") or ""), writers, _env("PEN_STORE"), _env("PEN_TZ"))
     # each request on its own thread, so a refused or checked request is answered while a write runs;
     # _one_write still lets only one write run at a time
     server = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    print(f"scriptorium MCP on http://127.0.0.1:{a.port}/mcp (folder {Config.root})", flush=True)
+    print(f"scriptorium MCP on http://127.0.0.1:{server.server_port}/mcp (folder {Config.root})", flush=True)
     server.serve_forever()
 
 
