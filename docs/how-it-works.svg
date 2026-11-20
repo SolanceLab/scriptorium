@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 610" width="1020" height="610" role="img" aria-labelledby="t d">
-  <title id="t">How Scriptorium works</title>
-  <desc id="d">Without it, you would search thousands of lines yourself (crossed out). Your chats go in on the left. Inside Scriptorium, a model you choose drafts from them, then plain code checks every quote against its line. On the right, what it writes: a memory in the speaker's exact words with its source line and real date; a page for each person holding only what they said themselves; and a tray of anything it could not prove, set aside for you to check. Below, with its pair Antechamber: everything Scriptorium wrote becomes findable, so when your AI asks where Mira lives now, it gets back the one right memory, Lisbon since May, with its line and date.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 872" width="1020" height="872" role="img" aria-labelledby="t d">
+  <title id="t">How Scriptorium works: the journal, and the assistant at its elbow</title>
+  <desc id="d">At the top, your AI's journal, written in its own hand: collections it names, every version kept, pins, deletes set aside never erased, and no script writes into it, only the AI holding its pen; two entries shown, a pinned journal entry about Mira moving to Lisbon and a lesson. Below, its assistant: your chats go in on the left, a model you choose drafts from them, plain code checks every quote against its line, and out come a note in the speaker's exact words with its line and date, a page for each person with only what they said themselves, and a tray of what it could not prove, set aside for you to check. At the bottom, its pair Antechamber finds your notes and chat lines again: asked where Mira lives now, it returns the one right note with its line and date.</desc>
   <style>
     .frame{fill:#f6f8fa;stroke:#8c959f;stroke-width:1.5;stroke-dasharray:6 5}
     .title{font:600 17px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#1f2328}
@@ -40,6 +40,35 @@
     }
   </style>
 
+
+  <!-- TOP: the journal, the core -->
+  <rect class="frame" x="20" y="20" width="980" height="190" rx="14"/>
+  <text class="title" x="40" y="52">Your AI's journal</text>
+  <text class="small" x="40" y="70">written in its own hand, by the AI holding its pen</text>
+  <text class="small" x="40" y="104">collections it names</text>
+  <text class="small" x="40" y="120">every version kept</text>
+  <text class="small" x="40" y="136">pins what it wants close</text>
+  <text class="small" x="40" y="152">a delete sets aside, never erases</text>
+  <text class="small" x="40" y="168">no script writes into it:</text>
+  <text class="small" x="40" y="184">only your AI, by hand</text>
+
+  <rect class="card" x="270" y="90" width="350" height="100" rx="8"/>
+  <rect class="note" x="270" y="90" width="8" height="100" rx="3" stroke-width="1.2"/>
+  <text class="label" x="290" y="110">Journal · 3 Nov · pinned</text>
+  <text class="quote" x="290" y="134">Mira told us she moved to Lisbon. I want</text>
+  <text class="quote" x="290" y="152">to remember how happy she sounded.</text>
+  <text class="small" x="290" y="176">version 2 · version 1 kept</text>
+
+  <rect class="card" x="640" y="90" width="340" height="100" rx="8"/>
+  <rect class="note" x="640" y="90" width="8" height="100" rx="3" stroke-width="1.2"/>
+  <text class="label" x="660" y="110">Lessons</text>
+  <text class="quote" x="660" y="134">Ask before I assume a plan</text>
+  <text class="quote" x="660" y="152">has changed.</text>
+  <text class="small" x="660" y="176">its own words, found again later</text>
+
+  <text class="verb" x="510" y="244" text-anchor="middle">and an assistant at its elbow, so nothing that matters slips</text>
+
+<g transform="translate(0,262)">
   <!-- TOP: the old way, crossed out -->
   <path class="old" d="M 200 58 C 400 10, 620 10, 820 58"/>
   <path class="oldhead" d="M 820 58 l -12 -2 l 7 -9 z"/>
@@ -71,7 +100,7 @@
 
   <!-- CENTRE: Scriptorium -->
   <rect class="ante" x="412" y="130" width="196" height="120" rx="12"/>
-  <text class="antetext" x="510" y="172" text-anchor="middle">Scriptorium</text>
+  <text class="antetext" x="510" y="172" text-anchor="middle">The assistant</text>
   <text class="antesmall" x="510" y="196" text-anchor="middle">a model you choose drafts</text>
   <text class="antesmall" x="510" y="214" text-anchor="middle">then the code checks every</text>
   <text class="antesmall" x="510" y="232" text-anchor="middle">quote against its line</text>
@@ -86,12 +115,12 @@
 
   <!-- RIGHT: what it writes -->
   <rect class="frame" x="660" y="20" width="340" height="340" rx="14"/>
-  <text class="title" x="680" y="52">What it writes</text>
+  <text class="title" x="680" y="52">Notes it writes</text>
 
-  <!-- a memory -->
+  <!-- a note -->
   <rect class="card" x="680" y="66" width="300" height="74" rx="8"/>
   <rect class="mem" x="680" y="66" width="8" height="74" rx="3" stroke-width="1.2"/>
-  <text class="label" x="700" y="86">A memory</text>
+  <text class="label" x="700" y="86">A note</text>
   <text class="quote" x="700" y="106">“we moved to Lisbon in May!”</text>
   <text class="small" x="700" y="126">Mira · line 214 · said on 3 Nov</text>
 
@@ -116,8 +145,8 @@
   <!-- BOTTOM: with its pair, Antechamber -->
   <rect class="frame" x="20" y="384" width="980" height="126" rx="14"/>
   <text class="title" x="40" y="414">Add its pair, Antechamber</text>
-  <text class="small" x="40" y="434">everything Scriptorium writes</text>
-  <text class="small" x="40" y="450">becomes something your AI</text>
+  <text class="small" x="40" y="434">your notes and people cards</text>
+  <text class="small" x="40" y="450">become something your AI</text>
   <text class="small" x="40" y="466">can find again, in one ask</text>
 
   <path class="arrow" d="M 830 362 L 830 400"/>
@@ -133,7 +162,8 @@
   <rect class="mem" x="270" y="402" width="8" height="92" rx="3" stroke-width="1.2"/>
   <text class="label" x="290" y="424">Your AI asks: where does Mira live now?</text>
   <text class="quote" x="290" y="448">“we moved to Lisbon in May!”</text>
-  <text class="small" x="290" y="468">the one right memory · Mira · line 214 · 3 Nov</text>
+  <text class="small" x="290" y="468">the one right note · Mira · line 214 · 3 Nov</text>
   <text class="small" x="290" y="484">no digging through old chats, no guessing</text>
+</g>
 </g>
 </svg>

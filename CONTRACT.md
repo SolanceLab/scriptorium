@@ -4,18 +4,20 @@
 
 | Door | What it answers |
 |---|---|
-| `write_memories` (MCP tool, and `engine/write_memories.py`) | A chat export in; one memory file per conversation out |
-| `write_people` (MCP tool, and `engine/write_people.py`) | The same export and its memory files in; one card file per recurring person out |
+| `pen_collections`, `pen_write`, `pen_edit`, `pen_read`, `pen_list`, `pen_history`, `pen_delete` (MCP tools, and `engine/pen.py`) | Your AI's journal: entries it writes by hand; no script writes here (docs/pen.md) |
+| `write_notes` (MCP tool, and `engine/write_notes.py`) | A chat export in; one notes file per conversation out |
+| `write_memories` (MCP tool, and `engine/write_memories.py`) | Old name of `write_notes`; same arguments, same files |
+| `write_people` (MCP tool, and `engine/write_people.py`) | The same export and its notes files in; one card file per recurring person out |
 | `POST /mcp` on 127.0.0.1 (`mcp/server.py`) | MCP over HTTP, JSON responses, keyed |
 
 ## Data it owns
 
 | Table / bucket / file | What is in it |
 |---|---|
-| `<out>/<conversation id>.json` | `conversation_id`, `title`, `session_date`, `memories` (topic, summary, excerpt, source_line_ids, source_session_date, salience, valence, emotions, context_tags), `rejected` (each with its reason), `calls` (model, usage, cost), `writer` (command, version, prompt fingerprint) |
-| `<out>/person-<key>.json` | The same file shape, `conversation_id` = `person:<key>`; each memory is one aspect of the person with every fact and its date |
+| `<out>/<conversation id>.json` | `conversation_id`, `title`, `session_date`, `memories` (the notes: topic, summary, excerpt, source_line_ids, source_session_date, salience, valence, emotions, context_tags), `rejected` (each with its reason), `calls` (model, usage, cost), `writer` (command, version, prompt fingerprint) |
+| `<out>/person-<key>.json` | The same file shape, `conversation_id` = `person:<key>`; each entry in `memories` is one aspect of the person with every fact and its date |
 
-The memory file shape is the contract with any reader: a recall engine reads `conversation_id`, `memories[].summary`, `excerpt`, `source_line_ids` and `source_session_date`, and finds the source lines in the same export.
+The notes file shape is the contract with any reader: a recall engine reads `conversation_id`, `memories[].summary`, `excerpt`, `source_line_ids` and `source_session_date`, and finds the source lines in the same export. The `memories` field holds notes; it keeps its old name so files written before stay readable.
 
 ## Optional account ids (found in chats)
 
@@ -48,5 +50,5 @@ Named here, never valued.
 | `SCRIPTORIUM_AGENTS` | Optional: a JSON object mapping key variable names to an agent or a list of agents (also read from `SCRIPTORIUM_WRITERS` / `MEMORY_ENTRY_WRITERS`, never together with them). A key with one agent is that agent; a key with several lists the pen tools with a required `agent` argument, one of those agents. A key with none can use extraction only. See docs/agents.md |
 | `--root` | The one folder the server may read and write |
 | `SCRIPTORIUM_MODEL_CMD` | Optional: a model command of your own for every write (another provider or a local model) |
-| `MEMORY_WRITER_CMD` | Optional: the same for `write_memories.py` run directly |
+| `MEMORY_WRITER_CMD` | Optional: the same for `write_notes.py` (or `write_memories.py`) run directly |
 | `SCRIPTORIUM_TZ` / `MEMORY_WRITER_TZ` | Optional: your time zone (IANA name) for calendar days, for the server / the writer run directly |

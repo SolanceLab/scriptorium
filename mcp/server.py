@@ -1,5 +1,5 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
-"""Scriptorium's MCP server: write memories from a chat export, and people cards from those memories.
+"""Scriptorium's MCP server: your AI's journal (the pen), plus notes and people cards written from a chat export.
 
     SCRIPTORIUM_MCP_KEY=<a long random key> python3 mcp/server.py --root ~/scriptorium [--port 8795]
 
@@ -47,38 +47,45 @@ def _plugin_version():
 SERVER_INFO = {"name": "scriptorium", "version": _plugin_version()}
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
-MAX_PIECES_PER_CALL = 100             # model pieces one write_memories call may start (the first conversation completes)
+MAX_PIECES_PER_CALL = 100             # model pieces one write_notes call may start (the first conversation completes)
 ENGINE = next((d for d in (os.path.join(HERE, "..", "engine", "writer"), os.path.join(HERE, "..", "engine"))
-               if os.path.exists(os.path.join(d, "write_memories.py"))), None)
+               if any(os.path.exists(os.path.join(d, f)) for f in ("write_notes.py", "write_memories.py"))), None)
 MAX_EXPORT = 200 * 1024 * 1024        # bytes; a bigger export is refused before any model is called
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
 MAX_BODY = 1_000_000
 _one_write = threading.Lock()
 
+_NOTES_SCHEMA = {"type": "object", "properties": {
+    "export": {"type": "string", "description": "Path of the conversations.json, inside the server's folder."},
+    "out": {"type": "string", "description": "Folder for the notes files, inside the server's folder."},
+    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
+              "description": f"How many conversations this call writes at most (default 10, max {MAX_LIMIT})."},
+    "model": {"type": "string", "description": "Model id, e.g. claude-sonnet-5-5 (pin one for repeatable runs)."},
+    "timezone": {"type": "string", "description": "Your time zone (IANA name, e.g. Asia/Jakarta), so days and "
+                                                  "'yesterday' follow your clock; default the export's own (UTC)."},
+}, "required": ["export", "out"]}
+
 TOOLS = [
+    {"name": "write_notes",
+     "description": ("Write notes from a chat export (Claude-format conversations.json): one notes file per "
+                     "conversation, each note with its exact words, source lines, real date, salience, valence "
+                     "and emotions, checked against the lines before it is kept. Notes are not your AI's journal; "
+                     "this tool never writes there. Finished conversations are skipped, so call again to continue "
+                     "a long export."),
+     "inputSchema": copy.deepcopy(_NOTES_SCHEMA)},
     {"name": "write_memories",
-     "description": ("Write memories from a chat export (Claude-format conversations.json): one memory file per "
-                     "conversation, each memory with its exact words, source lines, real date, salience, valence "
-                     "and emotions, checked against the lines before it is kept. Finished conversations are skipped, "
-                     "so call again to continue a long export."),
-     "inputSchema": {"type": "object", "properties": {
-         "export": {"type": "string", "description": "Path of the conversations.json, inside the server's folder."},
-         "out": {"type": "string", "description": "Folder for the memory files, inside the server's folder."},
-         "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
-                   "description": f"How many conversations this call writes at most (default 10, max {MAX_LIMIT})."},
-         "model": {"type": "string", "description": "Model id, e.g. claude-sonnet-5-5 (pin one for repeatable runs)."},
-         "timezone": {"type": "string", "description": "Your time zone (IANA name, e.g. Asia/Jakarta), so days and "
-                                                       "'yesterday' follow your clock; default the export's own (UTC)."},
-     }, "required": ["export", "out"]}},
+     "description": ("Old name of write_notes, kept so existing callers keep working. Same arguments, same files."),
+     "inputSchema": copy.deepcopy(_NOTES_SCHEMA)},
     {"name": "write_people",
-     "description": ("Join the memories of one user's many conversations into one card per recurring person "
-                     "(at least 2 conversations and 3 memories), each fact with its date and source lines."),
+     "description": ("Join the notes of one user's many conversations into one card per recurring person "
+                     "(at least 2 conversations and 3 notes), each fact with its date and source lines."),
      "inputSchema": {"type": "object", "properties": {
          "export": {"type": "string", "description": "Path of the same conversations.json, inside the server's folder."},
-         "memories": {"type": "string", "description": "The folder write_memories wrote, inside the server's folder."},
+         "memories": {"type": "string", "description": "The folder write_notes wrote, inside the server's folder "
+                                                       "(this argument keeps its old name)."},
          "out": {"type": "string", "description": "Folder for the person cards, inside the server's folder."},
          "model": {"type": "string", "description": "Model id, e.g. claude-sonnet-5-5."},
-         "timezone": {"type": "string", "description": "The same time zone the memories were written with."},
+         "timezone": {"type": "string", "description": "The same time zone the notes were written with."},
      }, "required": ["export", "memories", "out"]}},
 ]
 
@@ -204,11 +211,11 @@ def run_tool(name, args):
     if ENGINE is None:
         return "the writers are not installed next to this server", True
     try:
-        if name == "write_memories":
+        if name in ("write_notes", "write_memories"):
             limit = args.get("limit", 10)
             if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
                 raise ValueError(f"limit must be a whole number from 1 to {MAX_LIMIT}")
-            cmd = [sys.executable, os.path.join(ENGINE, "write_memories.py"),
+            cmd = [sys.executable, os.path.join(ENGINE, "write_notes.py" if os.path.exists(os.path.join(ENGINE, "write_notes.py")) else "write_memories.py"),
                    "--export", inside_root(args.get("export"), "file"), "--out", inside_root(args.get("out")),
                    "--prompt", "public", "--limit", str(limit), "--skip-existing",
                    "--max-pieces", str(MAX_PIECES_PER_CALL)] + model_args(args) + tz_args(args)

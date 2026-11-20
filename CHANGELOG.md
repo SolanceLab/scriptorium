@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0
+
+The chat reader's output is now called notes. Only your AI writes its journal, by hand, with the pen; what the reader pulls from your chats are notes, each proved by its line. New tool name `write_notes` and new file `engine/write_notes.py`. `write_memories` still works, as a tool and as `engine/write_memories.py` (importing or running it gives `write_notes`), so nothing you run needs to change; the skill falls back to `write_memories` on an older server. The notes files do not change: the field that holds the notes keeps its old name, `memories`, so files you already have and readers such as Antechamber keep working. README, docs and the skill now lead with the journal. The README states the key rules as they are: bind every key to its agent, even with one agent; a shared key opens every pen on it; a key not bound to any agent uses only the assistant.
+
 ## 1.4.0
 
 Shared keys: one key can now belong to several agents (an agent is the role or the identity a model speaks as). On such a key every pen tool takes a required `agent` argument, one of the agents on the key, spelled exactly; each agent's entries stay separate. A key with one agent works exactly as in 1.3.0. New `SCRIPTORIUM_AGENTS` setting (docs/agents.md); `SCRIPTORIUM_WRITERS` still works and now also accepts lists. `MEMORY_ENTRY_WRITERS` counts too: setting either of them together with `SCRIPTORIUM_AGENTS` is refused. A settings value of `null`, a list, a string or a number is now refused at start (1.3.0 let `null` through as extraction only). New `engine/setup_agents.py` writes the settings file; `mcp/count_tools.py` measures what a client sees. The server prints the port it really listens on, so `--port 0` works. Anyone holding a shared key can read, write, edit and delete entries for every agent on it.

@@ -20,6 +20,8 @@ Set `SCRIPTORIUM_AGENTS` to a JSON object. Each name is an environment variable 
 {"SCRIPTORIUM_MCP_KEY":["Mira","Echo"],"SCRIPTORIUM_AGENT_KEY_3":["Zed"]}
 ```
 
+One agent needs its key bound too: `{"SCRIPTORIUM_MCP_KEY":"Mira"}`. Without `SCRIPTORIUM_AGENTS`, the key you start the server with opens only the extraction tools.
+
 `SCRIPTORIUM_WRITERS` and `MEMORY_ENTRY_WRITERS` still work and now also accept lists. Setting either of them together with `SCRIPTORIUM_AGENTS` is refused at start. The value must be a JSON object; `null`, a list, a string and a number are refused.
 
 ## Setup
@@ -59,7 +61,7 @@ Before (1.3.0):
 | two agents | refused at start (not supported) | | |
 ```
 
-After:
+1.4.0:
 
 ```
 | Key | Tools | Description chars | Serialized chars |
@@ -69,4 +71,14 @@ After:
 | two agents | 9 | 1656 | 4382 |
 ```
 
-A shared key adds one `agent` argument to each of the seven pen tools; the tool count does not change.
+Unreleased (with `write_notes`):
+
+```
+| Key | Tools | Description chars | Serialized chars |
+| --- | --- | --- | --- |
+| one agent | 10 | 2018 | 4565 |
+| extraction only | 10 | 2018 | 4565 |
+| two agents | 10 | 2193 | 5277 |
+```
+
+A shared key adds one `agent` argument to each of the seven pen tools. `write_notes` is one more tool, and `write_memories` stays beside it as the old name.
