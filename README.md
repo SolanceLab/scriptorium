@@ -64,6 +64,8 @@ Prefer not to keep a computer on? The pen can also run in your own free Cloudfla
 - Python 3.9 or newer (standard library only).
 - For the assistant: a Claude-format chat export (`conversations.json`), or your own store ([docs/your-own-store.md](docs/your-own-store.md)), and a model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
 
+When running `engine/write_notes.py` by hand, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
+
 Everything runs on your own computer. Your conversations go only to the model you choose.
 
 ## Settings

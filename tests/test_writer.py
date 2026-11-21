@@ -1,11 +1,17 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The writer keeps only memories its lines prove. Run: python3 -m unittest discover -s engine/tests"""
+from contextlib import redirect_stderr, redirect_stdout
+from http.client import BadStatusLine, IncompleteRead
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/ beside tests/.
@@ -195,6 +201,228 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("no JSON array", res["error"])
             self.assertEqual(res["memories"], [])
 
+
+
+class ApiBilling(unittest.TestCase):
+    KEY = "fake-anthropic-test-key"
+    MODEL = "claude-sonnet-5-5"
+    SYSTEM = "You write notes from one conversation. Output only valid JSON."
+    NOTICE = ("ANTHROPIC_API_KEY is set, but the default runs through your Claude login; "
+              "add --api to bill the API key instead.\n")
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        export = os.path.join(temp.name, "conversations.json")
+        _dump([CONV], export)
+        self.out = os.path.join(temp.name, "out")
+        self.args = ["--export", export, "--out", self.out, "--prompt", "public"]
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        for context in (redirect_stdout(self.stdout), redirect_stderr(self.stderr),
+                        patch.dict(os.environ, {"ANTHROPIC_API_KEY": self.KEY, "MEMORY_WRITER_CMD": ""})):
+            context.__enter__()
+            self.addCleanup(context.__exit__, None, None, None)
+        del os.environ["MEMORY_WRITER_CMD"]
+        http = patch.object(w.request, "urlopen")
+        self.http = http.start()
+        self.addCleanup(http.stop)
+
+    def response(self, **fields):
+        message = {"model": self.MODEL, "usage": {"input_tokens": 1000, "output_tokens": 500},
+                   "content": [{"type": "text", "text": json.dumps([GOOD])}], "stop_reason": "end_turn"}
+        message.update(fields)
+        return io.BytesIO(json.dumps(message).encode())
+
+    def http_error(self, body=None):
+        if body is None:
+            bound = 4 * (300 + len(self.KEY))
+            body = (self.KEY * (bound // len(self.KEY) + 2)).encode()
+        return HTTPError("https://api.anthropic.com/v1/messages", 400, "Bad Request", {},
+                         io.BytesIO(body))
+
+    def summary(self):
+        return json.loads(self.stdout.getvalue().splitlines()[-2])
+
+    def test_missing_key_is_refused_before_opening_the_export(self):
+        os.environ["ANTHROPIC_API_KEY"] = ""
+        with self.assertRaises(SystemExit) as exc:
+            w.main(["--export", "missing.json", "--out", self.out, "--api"])
+        self.assertNotEqual(exc.exception.code, 0)
+        self.assertIn("--api requires ANTHROPIC_API_KEY", self.stderr.getvalue())
+        self.http.assert_not_called()
+
+    def test_custom_command_is_refused(self):
+        with self.assertRaises(SystemExit) as exc:
+            w.main(self.args + ["--api", "--model-cmd", "custom"])
+        self.assertNotEqual(exc.exception.code, 0)
+        self.assertIn("--api cannot be used with --model-cmd", self.stderr.getvalue())
+        self.http.assert_not_called()
+
+    def test_api_request_and_sonnet_cost(self):
+        self.http.return_value = self.response()
+        with patch.object(w.subprocess, "run", wraps=w.subprocess.run) as process:
+            self.assertEqual(w.main(self.args + ["--api", "--model", self.MODEL, "--timeout", "17"]), 0)
+        self.assertTrue(all(call.args[0][0] == "git" for call in process.call_args_list))
+        req, = self.http.call_args.args
+        self.assertEqual(self.http.call_args.kwargs, {"timeout": 17})
+        self.assertEqual(req.full_url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.get_header("X-api-key"), self.KEY)
+        self.assertNotIn("X-api-key", req.headers)
+        self.assertEqual(req.get_header("Anthropic-version"), "2026-10-21")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        body = json.loads(req.data)
+        self.assertEqual(body["model"], self.MODEL)
+        self.assertEqual(body["system"], self.SYSTEM)
+        self.assertEqual(body["max_tokens"], 16000)
+        message, = body["messages"]
+        self.assertEqual(message["role"], "user")
+        self.assertIn(CONV["chat_messages"][0]["text"], message["content"])
+        self.assertNotIn(self.KEY, message["content"])
+        result = _load(os.path.join(self.out, "conv-1.json"))
+        call, = result["calls"]
+        self.assertEqual(call["total_cost_usd"], 0.007)
+        self.assertEqual(call["models"], [self.MODEL])
+        self.assertEqual(call["usage"], {"input_tokens": 1000, "output_tokens": 500})
+        self.assertGreaterEqual(call["duration_ms"], 0)
+        self.assertEqual(self.stderr.getvalue(), "")
+        self.assertNotIn(self.KEY, json.dumps(result) + self.stdout.getvalue())
+
+    def test_unknown_model_makes_cost_incomplete(self):
+        self.http.return_value = self.response(model="future-model")
+        self.assertEqual(w.main(self.args + ["--api", "--model", "future-model"]), 0)
+        result = _load(os.path.join(self.out, "conv-1.json"))
+        self.assertIsNone(result["calls"][0].get("total_cost_usd"))
+        self.assertEqual(self.summary()["cost_usd"], 0.0)
+        self.assertTrue(self.summary()["cost_incomplete"])
+
+    def test_api_defaults_to_the_sonnet_model_id(self):
+        self.http.return_value = self.response()
+        self.assertEqual(w.main(self.args + ["--api"]), 0)
+        self.assertEqual(json.loads(self.http.call_args.args[0].data)["model"], self.MODEL)
+
+    def test_other_known_models_use_their_own_rates(self):
+        for model, expected in (("claude-haiku-5-5", 0.00035), ("claude-opus-5-5", 0.014)):
+            with self.subTest(model=model):
+                self.http.return_value = self.response(model=model)
+                _, record = w.call_api(model, self.KEY, "prompt", 17)
+                self.assertAlmostEqual(record["total_cost_usd"], expected)
+
+    def test_non_json_http_error_only_shows_status(self):
+        self.http.side_effect = self.http_error()
+        with self.assertRaises(RuntimeError) as exc:
+            w.call_api(self.MODEL, self.KEY, "prompt", 17)
+        self.assertEqual(str(exc.exception), "HTTP 400")
+
+    def test_json_http_error_only_shows_bounded_redacted_fields(self):
+        payload = {"error": {"type": self.KEY + "T" * 310, "message": "x" * 295 + self.KEY},
+                   "request_id": "must not appear"}
+        self.http.side_effect = self.http_error(json.dumps(payload).encode())
+        with self.assertRaises(RuntimeError) as exc:
+            w.call_api(self.MODEL, self.KEY, "prompt", 17)
+        self.assertEqual(str(exc.exception), "HTTP 400: " + "<redacted>" + "T" * 290 + ": " + "x" * 295 + "<reda")
+
+    def test_http_protocol_errors_are_normalized(self):
+        partial = IncompleteRead(self.KEY.encode())
+        response = self.response()
+        with response, patch.object(response, "read", side_effect=partial):
+            for failure in (BadStatusLine(self.KEY), response):
+                with self.subTest(failure=type(failure)):
+                    self.http.side_effect = [failure]
+                    with self.assertRaises(RuntimeError) as exc:
+                        w.call_api(self.MODEL, self.KEY, "prompt", 17)
+                    self.assertNotIn(self.KEY, str(exc.exception))
+        http_error = self.http_error()
+        self.http.side_effect = http_error
+        with patch.object(http_error, "read", side_effect=partial):
+            with self.assertRaisesRegex(RuntimeError, "^HTTP 400$"):
+                w.call_api(self.MODEL, self.KEY, "prompt", 17)
+
+    def test_refusal_raises(self):
+        self.http.return_value = self.response(stop_reason="refusal")
+        with self.assertRaisesRegex(RuntimeError, "Anthropic API refused"):
+            w.call_api(self.MODEL, self.KEY, "prompt", 17)
+
+    def test_only_completion_stop_reasons_succeed(self):
+        for reason in ("pause_turn", "model_context_window_exceeded", None):
+            with self.subTest(reason=reason):
+                self.http.return_value = self.response(stop_reason=reason)
+                with self.assertRaisesRegex(RuntimeError, "non-completion") as exc:
+                    w.call_api(self.MODEL, self.KEY, "prompt", 17)
+                self.assertEqual(exc.exception.record["total_cost_usd"], 0.007)
+        self.http.return_value = self.response(stop_reason="stop_sequence")
+        answer, _ = w.call_api(self.MODEL, self.KEY, "prompt", 17)
+        self.assertEqual(json.loads(answer), [GOOD])
+
+    def test_billed_failures_count_across_regular_and_date_retries(self):
+        wrong_date = dict(GOOD, summary="Priya signed up on Friday 14 March 2022.")
+        date_response = self.response(content=[{"type": "text", "text": json.dumps([GOOD, wrong_date])}])
+        self.http.side_effect = [self.response(stop_reason="max_tokens"), date_response,
+                                 self.response(stop_reason="refusal")]
+        self.assertEqual(w.main(self.args + ["--api"]), 0)
+        result = _load(os.path.join(self.out, "conv-1.json"))
+        self.assertEqual([call["total_cost_usd"] for call in result["calls"]], [0.007] * 3)
+        self.assertEqual(result["calls"][-1]["retry"], "date")
+        self.assertEqual(self.summary()["cost_usd"], 0.021)
+        self.assertNotIn("cost_incomplete", self.summary())
+
+    def test_timeout_marks_cost_incomplete_even_after_successful_retry(self):
+        self.http.side_effect = [TimeoutError(self.KEY), self.response()]
+        self.assertEqual(w.main(self.args + ["--api"]), 0)
+        self.assertEqual(self.summary()["cost_usd"], 0.007)
+        self.assertTrue(self.summary()["cost_incomplete"])
+        self.assertIn("cost may be incomplete", self.stdout.getvalue())
+
+    def test_truncated_or_malformed_messages_raise(self):
+        for fields, message in (({"stop_reason": "max_tokens"}, "reached the token limit"),
+                                ({"content": None}, "returned an invalid message")):
+            with self.subTest(fields=fields):
+                self.http.return_value = self.response(**fields)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    w.call_api(self.MODEL, self.KEY, "prompt", 17)
+
+    def test_key_in_prompt_is_refused_before_sending(self):
+        with self.assertRaises(RuntimeError) as exc:
+            w.call_api(self.MODEL, self.KEY, "prompt " + self.KEY, 17)
+        self.assertNotIn(self.KEY, str(exc.exception))
+        self.http.assert_not_called()
+
+    def test_http_errors_are_retried_and_stay_redacted_in_cli_output(self):
+        self.http.side_effect = [self.http_error(), self.http_error()]
+        self.assertEqual(w.main(self.args + ["--api", "--model", self.MODEL]), 1)
+        self.assertEqual(self.http.call_count, 2)
+        result = _load(os.path.join(self.out, "conv-1.json"))
+        self.assertIn("HTTP 400", result["error"])
+        self.assertEqual(self.summary()["cost_usd"], 0.0)
+        self.assertTrue(self.summary()["cost_incomplete"])
+        self.assertNotIn(self.KEY, json.dumps(result) + self.stdout.getvalue() + self.stderr.getvalue())
+
+    def test_echoed_key_is_redacted_from_answer_and_metadata(self):
+        self.http.return_value = self.response(
+            model=self.KEY, usage={"nested": [self.KEY]},
+            content=[{"type": "text", "text": self.KEY}])
+        answer, record = w.call_api(self.MODEL, self.KEY, "prompt", 17)
+        self.assertNotIn(self.KEY, answer + json.dumps(record))
+
+    def test_default_warns_once_and_keeps_the_key_out_of_the_environment(self):
+        _dump([CONV, dict(CONV, uuid="conv-2")], self.args[1])
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps([GOOD]))
+        with patch.object(w.subprocess, "run", return_value=completed) as process:
+            self.assertEqual(w.main(self.args), 0)
+        calls = [call for call in process.call_args_list if "input" in call.kwargs]
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            args = call.args[0]
+            self.assertEqual(args[args.index("--system-prompt") + 1], self.SYSTEM)
+            self.assertNotIn("ANTHROPIC_API_KEY", call.kwargs["env"])
+        self.assertEqual(self.stderr.getvalue(), self.NOTICE)
+        self.http.assert_not_called()
+
+    def test_custom_command_does_not_warn(self):
+        with patch.object(w, "call_model", return_value=json.dumps([GOOD])):
+            self.assertEqual(w.main(self.args + ["--model-cmd", "custom"]), 0)
+        self.assertEqual(self.stderr.getvalue(), "")
+        self.http.assert_not_called()
 
 
 class RunRecord(unittest.TestCase):

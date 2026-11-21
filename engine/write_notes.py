@@ -6,7 +6,7 @@ before anything is kept: every note must cite line ids that exist in that sessio
 word for word in those lines. A note that fails is reported, never kept.
 
     python3 write_notes.py --export conversations.json --out DIR [--limit N] [--model claude-sonnet-5-5]
-                           [--prompt public] [--model-cmd "<command>"] [--skip-existing]
+                           [--prompt public] [--api | --model-cmd "<command>"] [--skip-existing]
 
 The model is whatever command `--model-cmd` names: it receives the full prompt on stdin and prints its answer (plain,
 or Claude Code's `--output-format json` envelope, whose model, usage and cost are then recorded). Every output file
@@ -20,6 +20,8 @@ Each file keeps its notes under the key "memories", the old name, so files writt
 write_memories.py is the old name of this file and still works.
 """
 import argparse
+from functools import partial
+from http.client import HTTPException
 import json
 import os
 import re
@@ -29,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib import error, request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The default command switches off every tool, so a hostile line in an export cannot make the model read, run or
@@ -38,10 +41,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and runs as the user. A --model-cmd of your own gets none of these protections unless you add them.
 # {model} is filled from --model. Pass a PINNED id (claude-sonnet-5-5) for any run that is reported: an alias
 # (sonnet) moves when a new model ships, and the recorded command would then not say which model wrote the memories.
+API_PRICES = {"claude-sonnet-5-5": (2, 10), "claude-haiku-5-5": (0.10, 0.50), "claude-opus-5-5": (4, 20)}
 DEFAULT_MODEL = "sonnet"
+SYSTEM_PROMPT = "You write notes from one conversation. Output only valid JSON."
+DEFAULT_API_MODEL = "claude-sonnet-5-5"
 MODEL_CMD_TEMPLATE = ('claude -p --model {model} --output-format json --tools "" --setting-sources "" --strict-mcp-config '
-                      '--disable-slash-commands --no-session-persistence --system-prompt "You write memories from one '
-                      'conversation. Output only valid JSON."')
+                      f'--disable-slash-commands --no-session-persistence --system-prompt "{SYSTEM_PROMPT}"')
 DEFAULT_MODEL_CMD = MODEL_CMD_TEMPLATE.format(model=DEFAULT_MODEL)
 PROMPTS = {"house": os.path.join(HERE, "prompt.md"),            # the House's own (carries the House notice)
            "public": os.path.join(HERE, "prompt-public.md")}    # same method, no House notice or vocabulary
@@ -339,6 +344,90 @@ def call_model(model_cmd, prompt, timeout):
     return proc.stdout
 
 
+def _redact(value, key):
+    if isinstance(value, str):
+        return value.replace(key, "<redacted>")
+    if isinstance(value, dict):
+        return {_redact(k, key): _redact(v, key) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, key) for item in value]
+    return value
+
+
+class ApiCallError(RuntimeError):
+    def __init__(self, message, record=None):
+        super().__init__(message)
+        self.record = record if record is not None else {"cost_incomplete": True}
+
+
+def _http_error_detail(exc, key):
+    status = f"HTTP {exc.code}"
+    limit = 64 * 1024
+    try:
+        with exc:
+            body = exc.read(limit + 1)
+        if len(body) > limit:
+            return status
+        payload = json.loads(body)
+    except (OSError, HTTPException, ValueError, RecursionError):
+        return status
+    detail = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(detail, dict):
+        fields = [_redact(detail[name], key)[:300] for name in ("type", "message")
+                  if isinstance(detail.get(name), str)]
+        if fields:
+            return f"{status}: {': '.join(fields)}"
+    return status
+
+
+def call_api(model, key, prompt, timeout):
+    if key in prompt or key in model:
+        raise RuntimeError("Anthropic API request contains the API key outside its header")
+    body = {"model": model, "max_tokens": 16000, "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": prompt}]}
+    req = request.Request("https://api.anthropic.com/v1/messages", data=json.dumps(body).encode("utf-8"),
+                          headers={"anthropic-version": "2026-10-21", "content-type": "application/json"},
+                          method="POST")
+    req.add_unredirected_header("X-api-key", key)
+    start = time.monotonic()
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            message = json.load(response)
+    except error.HTTPError as exc:
+        raise ApiCallError(_redact(_http_error_detail(exc, key), key)) from None
+    except HTTPException as exc:
+        raise ApiCallError(_redact(f"Anthropic API request failed: {type(exc).__name__}", key)) from None
+    except (OSError, ValueError) as exc:
+        raise ApiCallError(_redact(f"Anthropic API request failed: {exc}", key)) from None
+    if not isinstance(message, dict):
+        raise ApiCallError("Anthropic API returned an invalid message")
+    try:
+        usage = message["usage"]
+        actual_model = message["model"]
+        rates = API_PRICES.get(actual_model)
+        record = {"models": [actual_model], "usage": usage, "duration_ms": round((time.monotonic() - start) * 1000)}
+        if rates is not None:
+            record["total_cost_usd"] = (
+                usage["input_tokens"] * rates[0] + usage["output_tokens"] * rates[1]) / 1_000_000
+    except (KeyError, TypeError):
+        raise ApiCallError("Anthropic API returned an invalid message") from None
+    record = _redact(record, key)
+    reason = message.get("stop_reason")
+    if reason not in ("end_turn", "stop_sequence"):
+        if reason == "refusal":
+            detail = "Anthropic API refused the request"
+        elif reason == "max_tokens":
+            detail = "Anthropic API response reached the token limit"
+        else:
+            detail = "Anthropic API returned a non-completion stop reason"
+        raise ApiCallError(detail, record)
+    try:
+        answer = "".join(block["text"] for block in message["content"] if block["type"] == "text")
+    except (KeyError, TypeError):
+        raise ApiCallError("Anthropic API returned an invalid message", record) from None
+    return _redact(answer, key), record
+
+
 def unwrap(stdout):
     """(answer text, call record). Claude Code's --output-format json envelope gives the answer in `result` and says
     which model ran and what it cost; any other output is the answer itself, with an empty record."""
@@ -393,7 +482,13 @@ def split_pieces(lines, date, max_chars=MAX_PIECE_CHARS, tz=None):
     return pieces or [(date, [])]
 
 
-def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=MAX_PIECE_CHARS, tz=None):
+def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=MAX_PIECE_CHARS, tz=None,
+                       api_call=None):
+    def fetch(prompt):
+        if api_call is not None:
+            return api_call(prompt, timeout)
+        return unwrap(call_model(model_cmd, prompt, timeout))
+
     cid, title, lines = claude_lines(conv)
     date = session_date(conv, lines, tz)
     pieces = split_pieces(lines, date, max_chars, tz)
@@ -402,7 +497,7 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
                 "calls": [], "error": f"{len(pieces)} pieces (more than {MAX_PIECES}); nothing was sent to the model"}
     if len(pieces) == 1:
         date = pieces[0][0]       # the day its messages carry (the same as the conversation's, unless they differ)
-        kept, rejected, calls, err = _write_piece(title, date, lines, template, model_cmd, timeout, retries)
+        kept, rejected, calls, err = _write_piece(title, date, lines, template, fetch, retries)
         out = {"conversation_id": cid, "title": title, "session_date": date, "memories": kept,
                "rejected": rejected, "calls": calls}
         if err is not None:
@@ -410,8 +505,7 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
         return out
     kept, rejected, calls, errors = [], [], [], []
     for i, (day, part) in enumerate(pieces, 1):
-        k, r, c, err = _write_piece(f"{title} (part {i} of {len(pieces)})", day, part, template, model_cmd, timeout,
-                                    retries)
+        k, r, c, err = _write_piece(f"{title} (part {i} of {len(pieces)})", day, part, template, fetch, retries)
         kept += k
         rejected += r
         calls += [dict(x, piece=i) for x in c]
@@ -424,7 +518,7 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
     return out
 
 
-def _write_piece(title, date, lines, template, model_cmd, timeout, retries):
+def _write_piece(title, date, lines, template, fetch, retries):
     """One model call (plus retries) for one piece: (kept, rejected, calls, error or None)."""
     by_id = {lid: text for lid, _, text, _ in lines}
     prompt = build_prompt(template, title, date, lines)
@@ -432,10 +526,13 @@ def _write_piece(title, date, lines, template, model_cmd, timeout, retries):
     calls = []
     for _ in range(retries + 1):
         try:
-            text, rec = unwrap(call_model(model_cmd, prompt, timeout))
+            text, rec = fetch(prompt)
             calls.append(rec)
             threads = parse_answer(text)
             break
+        except ApiCallError as e:
+            calls.append(e.record)
+            last_err = str(e)
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
             last_err = str(e)
     else:
@@ -448,11 +545,13 @@ def _write_piece(title, date, lines, template, model_cmd, timeout, retries):
         fix = ("\n\nYour previous answer had these date errors. Read each date off the relative-date key above and "
                "answer again in full:\n- " + "\n- ".join(date_errors) + "\n")
         try:
-            text, rec = unwrap(call_model(model_cmd, prompt + fix, timeout))
+            text, rec = fetch(prompt + fix)
             calls.append(dict(rec, retry="date"))
             k2, r2 = _check_all(parse_answer(text), by_id, date)
             if len(k2) >= len(kept):
                 kept, rejected = k2, r2
+        except ApiCallError as e:
+            calls.append(dict(e.record, retry="date"))
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
             pass
     return kept, rejected, calls, None
@@ -472,7 +571,7 @@ def run_record(model_cmd, prompt_path):
                                   env=minimal_env()).stdout.strip() or None
         except (OSError, subprocess.TimeoutExpired):
             return None
-    prog = shlex.split(model_cmd)[0] if model_cmd.strip() else ""
+    prog = shlex.split(model_cmd)[0] if model_cmd and model_cmd.strip() else ""
     commit = out(["git", "rev-parse", "HEAD"], cwd=HERE)
     dirty = out(["git", "status", "--porcelain", "--", "."], cwd=HERE)
     return {"model_cmd": model_cmd,
@@ -511,8 +610,10 @@ def main(argv=None):
     ap.add_argument("--export", required=True, help="a Claude-format conversations.json")
     ap.add_argument("--out", required=True, help="folder for one notes file per conversation")
     ap.add_argument("--limit", type=int, default=0, help="only the first N conversations")
-    ap.add_argument("--model", default=DEFAULT_MODEL,
-                    help="model id for the default command; pin one (claude-sonnet-5-5) for a reported run")
+    ap.add_argument("--model",
+                    help="model id for Claude Code or the API; pin one (claude-sonnet-5-5) for a reported run")
+    ap.add_argument("--api", action="store_true",
+                    help="call Anthropic directly and bill ANTHROPIC_API_KEY instead of the Claude Code login")
     ap.add_argument("--model-cmd", default=os.environ.get("MEMORY_WRITER_CMD"),
                     help="a whole command of your own instead of the default (overrides --model)")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="public | house (House copy only) | a path to a prompt file")
@@ -526,13 +627,24 @@ def main(argv=None):
                     help="stop before a conversation that would take this run past N model pieces (0 = no cap); "
                          "the first conversation of a run always completes")
     a = ap.parse_args(argv)
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if a.api:
+        if a.model_cmd is not None:
+            ap.error("--api cannot be used with --model-cmd or MEMORY_WRITER_CMD")
+        if not key:
+            ap.error("--api requires ANTHROPIC_API_KEY to be set")
+    elif key and not a.model_cmd:
+        print("ANTHROPIC_API_KEY is set, but the default runs through your Claude login; "
+              "add --api to bill the API key instead.", file=sys.stderr)
     if a.timezone:
         from zoneinfo import ZoneInfo
         try:
             ZoneInfo(a.timezone)
         except Exception:
             ap.error(f"unknown time zone {a.timezone!r} (use an IANA name such as Asia/Jakarta)")
-    model_cmd = a.model_cmd or MODEL_CMD_TEMPLATE.format(model=shlex.quote(a.model))
+    model = a.model if a.model is not None else (DEFAULT_API_MODEL if a.api else DEFAULT_MODEL)
+    model_cmd = None if a.api else a.model_cmd or MODEL_CMD_TEMPLATE.format(model=shlex.quote(model))
+    api_call = partial(call_api, model, key) if a.api else None
     prompt_path = PROMPTS.get(a.prompt, a.prompt)
     with open(prompt_path, encoding="utf-8") as f:
         template = f.read()
@@ -542,6 +654,8 @@ def main(argv=None):
         convs = convs[:a.limit]
     os.makedirs(a.out, exist_ok=True)
     record = dict(run_record(model_cmd, prompt_path), timezone=a.timezone or "as exported")
+    if a.api:
+        record.update(transport="anthropic_api", model=model)
     total = {"expected": len(convs), "skipped_finished": 0, "written": 0, "errored": 0, "empty": 0,
              "memories": 0, "rejected": 0, "cost_usd": 0.0}
     pieces_used, stopped = 0, None
@@ -561,18 +675,24 @@ def main(argv=None):
             break
         pieces_used += n_pieces
         t0 = time.time()
-        res = write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone)
+        res = write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone, api_call=api_call)
         res["writer"] = dict(record, seconds=round(time.time() - t0, 1))
+        if a.api:
+            res = _redact(res, key)
         write_atomic(path, res)
         total["written"] += 1
         total["memories"] += len(res["memories"])
         total["rejected"] += len(res["rejected"])
-        total["cost_usd"] += sum(c.get("total_cost_usd") or 0 for c in res.get("calls", []))
+        for call in res.get("calls", []):
+            cost = call.get("total_cost_usd")
+            if a.api and cost is None:
+                total["cost_incomplete"] = True
+            total["cost_usd"] += cost or 0
         if res.get("error"):
             total["errored"] += 1
         elif not res["memories"]:
             total["empty"] += 1
-        print(f"{cid}: {len(res['memories'])} kept, {len(res['rejected'])} rejected"
+        print(f"{_redact(cid, key) if a.api else cid}: {len(res['memories'])} kept, {len(res['rejected'])} rejected"
               + (f", ERROR {res['error']}" if res.get("error") else ""), flush=True)
     total["cost_usd"] = round(total["cost_usd"], 4)
     total["finished"] = total["skipped_finished"] + total["written"] - total["errored"] - total["empty"]
@@ -581,7 +701,8 @@ def main(argv=None):
         total["stopped"] = stopped + "; run again to continue"
     print(json.dumps(total))
     print(f"expected {total['expected']} · finished {total['finished']} · errored {total['errored']} · "
-          f"empty {total['empty']}" + (f" · stopped: {total['stopped']}" if stopped else ""), flush=True)
+          f"empty {total['empty']}" + (" · cost may be incomplete" if total.get("cost_incomplete") else "")
+          + (f" · stopped: {total['stopped']}" if stopped else ""), flush=True)
     return 1 if (total["errored"] or total["empty"]) else 0
 
 
