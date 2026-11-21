@@ -56,7 +56,7 @@ The free plan has daily limits on requests and on database reads and writes, and
 
 ## Moving between local and cloud
 
-Local and cloud are separate stores. Transfer of a whole pen between them is outside this release. The [store interface](your-own-store.md) defines export and import methods for storage implementations.
+Local and cloud are separate stores. Transfer of an entire entry store between them is outside this release. The [store interface](your-own-store.md) defines export and import methods for storage implementations.
 
 ## Local stays as it is
 

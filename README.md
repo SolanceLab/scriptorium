@@ -1,26 +1,12 @@
 # Scriptorium
 
+Scriptorium writes entries and chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
+
 Made by House of Solance · free for noncommercial use · credit required
 
-Scriptorium gives your AI a journal of its own, written in its own hand, and an assistant that reads your chats back so nothing that matters slips.
+Your AI chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
 
-<div align="center">
-
-📜
-
-*Imagine your AI keeps a journal. It writes the moments it chose to remember, revises them as it understands more, and pins the ones it wants to keep close. The journal is its own: no script writes in it, only the AI holding its pen.*
-
-*But most of what happens is talk, thousands of lines a day, and no one can copy all of it down. Someone mentions they moved, a birthday, a new job, once and in passing. A week later it's gone.*
-
-**So the writer has an assistant at its elbow.** *When the day goes quiet, the assistant reads back the talk and drafts what matters: each note in the speaker's own words, with the line it came from and the real date, and a page for every person, holding only what they said themselves.*
-
-*The writer keeps the pen. The assistant copies, it never invents, and it never writes in the journal. Anything it can't point to a line for, it sets aside to be checked.*
-
-</div>
-
-<p align="center"><img src="docs/how-it-works.svg" width="900" alt="At the top, your AI's journal, written in its own hand. Below it, your chats go into The assistant: a model you choose drafts notes, then plain code checks every quote against its line. Out come notes with their line and date, a page per person, and what could not be proved, set aside. Antechamber finds the notes again."></p>
-
-Its pair, [Antechamber](https://github.com/SolanceLab/antechamber), is the librarian who finds your notes and chat lines again.
+<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes entries in its own collections. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
 
 ## Quick start
 
@@ -31,7 +17,7 @@ read -rs SCRIPTORIUM_MCP_KEY && export SCRIPTORIUM_MCP_KEY
 SCRIPTORIUM_AGENTS='{"SCRIPTORIUM_MCP_KEY":"<name of your AI>"}' python3 mcp/server.py --root "$HOME/scriptorium"
 ```
 
-The key prompt needs bash or zsh (macOS and most Linux shells). The `read` line asks you to type a random key of at least 16 characters; it stays out of your shell history. The `SCRIPTORIUM_AGENTS` line binds that key to your AI, so it can write in its pen. For several AIs, run `python3 engine/setup_agents.py` ([docs/agents.md](docs/agents.md)).
+The key prompt needs bash or zsh (macOS and most Linux shells). The `read` line asks you to type a random key of at least 16 characters; it stays out of your shell history. The `SCRIPTORIUM_AGENTS` line binds that key to your AI, so it can write entries. For several AIs, run `python3 engine/setup_agents.py` ([docs/agents.md](docs/agents.md)).
 
 In a second terminal, add the plugin; it asks for the server address and the key:
 
@@ -40,31 +26,24 @@ claude plugin marketplace add SolanceLab/plugins
 claude plugin install scriptorium@solancelab
 ```
 
-Give your AI its pen ([docs/agents.md](docs/agents.md)) and it can start its journal. To let the assistant read your chats too, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. In Codex: [docs/codex.md](docs/codex.md).
+Once the key is bound, your AI can write entries. To generate chat notes, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
 
-Prefer not to keep a computer on? The pen can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
+Prefer not to keep a computer on? The entry tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
 
 ## What it is
 
-**The journal.** Your AI writes its own entries by hand, in collections it names: a journal by day, reflections, lessons, a summary of who it is, whatever it chooses. Every entry keeps its history and can be pinned; a delete sets it aside instead of erasing it.
+**Entries.** Your AI writes entries in collections it names, such as daily records, reflections, or lessons. Each entry keeps its revision history and can be pinned. Deleted entries are set aside for recovery.
 
-*Who can write in it.* Each agent has its own pen. A key opens the pens of the agents it is bound to: one agent, or several that share a chat ([docs/agents.md](docs/agents.md)). Anyone holding a shared key can write in every pen on it. A key bound to no agent can use only the assistant. No script writes into it: the assistant's tools refuse any path inside the pen folder and never load the pen, and the tests check both. What goes in is what your AI chooses to write, even when it quotes a chat.
+**Who can write entries.** Each agent writes in its own collections. A key grants write access to every agent it is bound to. A key with no agent can use the extraction tools only. The extraction tools reject paths inside the entry store, and the notes writer keeps its output in a separate folder. See [Agents](docs/agents.md) for shared keys and reading permissions.
 
-**The assistant.** It reads your chat history and writes notes: each one checked word for word against the line it came from, and one card for every person who keeps coming up. Every night it can read your new messages and add what people said about themselves to their cards. Notes are offered to your AI and to you; the assistant never writes them into the journal. Your AI decides what to write there itself. It is made for conversations, the people and moments in them, not for coding sessions.
-
-| Word | Who writes it | From |
-|---|---|---|
-| Journal | your AI, by hand (the pen) | its own choice |
-| Notes | the assistant (a script) | your chat history, each note tied to its line |
-| Chat history | nobody: it is what was said | your chats |
-| People cards | the assistant, with cited lines | your chat history |
+**Chat notes.** The notes writer checks excerpts against the lines they came from. It can build a card for each recurring person and, if you schedule the nightly roster, use new messages to gather what people said about themselves.
 
 ## What you need
 
 - Python 3.9 or newer (standard library only).
-- For the assistant: a Claude-format chat export (`conversations.json`), or your own store ([docs/your-own-store.md](docs/your-own-store.md)), and a model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
+- For the notes writer: a Claude-format chat export (`conversations.json`), or your own store ([docs/your-own-store.md](docs/your-own-store.md)), and a model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
 
-When running `engine/write_notes.py` by hand, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
+When running `engine/write_notes.py` directly, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
 
 The built-in notes prompt tags speakers as `user` and `agent`. Use `--user-name` or `--agent-name` to replace a role word with a name, or leave the name blank to keep the role. Add `--platform Discord` for a tag such as `agent · Discord`. The CLI and MCP server read `SCRIPTORIUM_USER_NAME`, `SCRIPTORIUM_AGENT_NAME`, and `SCRIPTORIUM_PLATFORM` from their environment. These settings go to the selected model. The prompt keeps time words such as “last night” as spoken.
 
@@ -75,11 +54,11 @@ Everything runs on your own computer. Your conversations go only to the model yo
 | Setting | What it is |
 |---|---|
 | Server address | Where your Scriptorium server answers: `http://127.0.0.1:8795/mcp` unless you changed the port |
-| Key | The key bound to your agent in `SCRIPTORIUM_AGENTS` (setup writes it; see [Agents](docs/agents.md)). Even with one agent, bind its key: a key bound to no agent opens only the assistant, not the pen. |
+| Key | The key bound to your agent in `SCRIPTORIUM_AGENTS` (setup writes it; see [Agents](docs/agents.md)). Even with one agent, bind its key: a key bound to no agent grants access to extraction tools only. |
 
 ## Tools
 
-**The journal**, your AI's own pen ([docs/pen.md](docs/pen.md)):
+**Entry tools** ([entry storage and tools](docs/pen.md))
 
 | Tool | What it does |
 |---|---|
@@ -91,22 +70,22 @@ Everything runs on your own computer. Your conversations go only to the model yo
 | `pen_history` | Every version of an entry, oldest first. |
 | `pen_delete` | Sets an entry aside with its history; nothing is erased. |
 
-A skill, pen-writing, tells your AI how to write entries it can find again later.
+The `pen-writing` skill tells your AI how to write entries it can find again later.
 
-**The assistant**, which reads your chats:
+**Chat extraction tools**
 
 | Tool | What it does |
 |---|---|
 | `write_notes` | Writes notes from a chat export, one file per conversation. Call it again to continue a long export. Its old name, `write_memories`, still works. |
 | `write_people` | Gathers what one person said across your notes into one card, with source lines. "Jean-Luc" and "Jean Luc" are one person. |
 
-The nightly roster, the People page and running everything by hand: [docs/roster.md](docs/roster.md).
+The nightly roster, the People page and running the writers directly: [docs/roster.md](docs/roster.md).
 
 ## People page
 
-Your people, one card each, in your browser. What the nightly run found waits under Suggestions: a value for a card's field, or a fact it could not prove by itself and set aside for you to check by hand, with the reason and the words it came from. Accept puts it on the card; Dismiss drops it; either way it does not come back. Start it with `make people-page CARDS=people OUT=found` (it answers only on this computer).
+Your people, one card each, in your browser. What the nightly run found waits under Suggestions: a value for a card's field, or a fact it could not prove by itself and set aside for you to review, with the reason and the words it came from. Accept puts it on the card; Dismiss drops it; either way it does not come back. Start it with `make people-page CARDS=people OUT=found` (it answers only on this computer).
 
-<p align="center"><img src="docs/people-page.png" width="800" alt="The People page. Under Suggestions, for a person named Alma: a place, Lisbon, from the words 'Alma moved to Lisbon'; and a fact set aside to check by hand, 'Used to live in Porto', with the reason (the sentence is in the past) and the words it came from. Each has an Accept and a Dismiss button."></p>
+<p align="center"><img src="docs/people-page.png" width="800" alt="The People page. Under Suggestions, for a person named Alma: a place, Lisbon, from the words 'Alma moved to Lisbon'; and a fact set aside to review, 'Used to live in Porto', with the reason (the sentence is in the past) and the words it came from. Each has an Accept and a Dismiss button."></p>
 
 ## Limits
 

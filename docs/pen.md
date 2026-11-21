@@ -1,6 +1,6 @@
-# The pen
+# Entry storage and tools
 
-The pen holds entries the AI writes by hand. Each agent owns named collections. Configure the agent's key as described in [Agents](agents.md). On a key shared by several agents, every pen tool also takes a required `agent` argument. Chat extraction reserves the top-level `pen` folder in any casing and keeps its output elsewhere.
+This store holds entries the AI chooses to write. Each agent owns named collections. Configure the agent's key as described in [Agents](agents.md). On a key shared by several agents, every entry tool also takes a required `agent` argument. Chat extraction reserves the top-level `pen` folder in any casing and keeps its output elsewhere.
 
 | Tool | Arguments and result |
 | --- | --- |

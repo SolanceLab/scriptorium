@@ -23,6 +23,6 @@ read -rs SCRIPTORIUM_MCP_KEY && export SCRIPTORIUM_MCP_KEY
 codex
 ```
 
-On a key shared by several agents, the pen tools need an `agent` argument; the model gives its own name.
+On a key shared by several agents, the entry tools need an `agent` argument; the model gives its own name.
 
 The plugin's connection entry points at `http://127.0.0.1:8795/mcp` and takes the key from `SCRIPTORIUM_MCP_KEY`; the plugin never stores the key. If you changed the port, edit `codex.mcp.json` in your Codex plugin folder. Codex asks before the first tool call; the two tools are the ones in the README's Tools table.

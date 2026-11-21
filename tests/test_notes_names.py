@@ -448,26 +448,17 @@ class OldOutputStillReads(unittest.TestCase):
             self.assertEqual([f["fact"] for f in facts], ["Moved to Lisbon."])
 
 
-AGENT_RULE = ("Each agent has its own pen. A key opens the pens of the agents it is bound to: one agent, or several "
-              "that share a chat ([docs/agents.md](docs/agents.md)). Anyone holding a shared key can write in every "
-              "pen on it. A key bound to no agent can use only the assistant.")
-KEY_ROW = ("| Key | The key bound to your agent in `SCRIPTORIUM_AGENTS` (setup writes it; see [Agents](docs/agents.md)). "
-           "Even with one agent, bind its key: a key bound to no agent opens only the assistant, not the pen. |")
+RETIRED_WORDS = re.compile(r"(?i)\b(?:journal|pen|hand)\b")
+ANTECHAMBER_URL = "https://github.com/SolanceLab/antechamber"
 FILES = ["README.md", "engine/README.md", "docs/how-it-works.md", "docs/how-it-works.svg", "docs/limits.md",
          "CONTRACT.md", "plugin/skills/scriptorium/SKILL.md", "plugin/skills/pen-writing/SKILL.md",
          "plugin/.claude-plugin/plugin.json", "plugin/.codex-plugin/plugin.json", ".claude-plugin/marketplace.json"]
-JOURNAL_CLAIM = ("No script writes into it: the assistant's tools refuse any path inside the pen folder and never load "
-                 "the pen, and the tests check both. What goes in is what your AI chooses to write, even when it "
-                 "quotes a chat.")
 FALLBACK = ("If the server's tool list has no `write_notes`, the server is older than this skill: call "
             "`write_memories` with the same arguments; it writes the same files.")
 OLD_WORD = re.compile(r"(?i)\bmemor(?:y|ies)\b")
 ALLOWED = [r"write_memories", r"MEMORY_(?:ENTRY|WRITER)_[A-Z_]+", r"`memories\[\][^`]*`", r"`memories_used`",
            r"`memories`", r'"memories"', r"--memories"]
 COMPAT = "The `memories` field holds notes; it keeps its old name so files written before stay readable."
-ALT = ("At the top, your AI's journal, written in its own hand. Below it, your chats go into The assistant: a model "
-       "you choose drafts notes, then plain code checks every quote against its line. Out come notes with their line "
-       "and date, a page per person, and what could not be proved, set aside. Antechamber finds the notes again.")
 
 
 def text_of(rel):
@@ -519,11 +510,18 @@ class WordsSayNotes(unittest.TestCase):
             with self.subTest(file=rel):
                 self.assertIn(COMPAT, text_of(rel))
 
-    def test_journal_leads(self):
+    def test_opening_explains_who_writes_and_who_finds(self):
         readme = text_of("README.md")
-        self.assertIn("Scriptorium gives your AI a journal of its own", readme)
-        self.assertLess(readme.index("Scriptorium gives your AI a journal of its own"), readme.index("notes"))
+        opening = readme.split("\n\n", 2)[1]
+        self.assertEqual(opening, f"Scriptorium writes entries and chat notes, and [Antechamber]({ANTECHAMBER_URL}) "
+                                  "finds notes and chat lines without writing anything.")
+        self.assertIn(f"[Antechamber]({ANTECHAMBER_URL})", text_of("docs/how-it-works.md"))
         self.assertIn("Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)", readme)
+
+    def test_readme_prose_uses_current_terms(self):
+        readme = text_of("README.md")
+        prose = re.sub(r"```.*?```|`[^`]*`|(?<=\])\([^)]*\)", "", readme, flags=re.S)
+        self.assertIsNone(RETIRED_WORDS.search(prose))
 
     def test_new_name_leads_where_tools_are_taught(self):
         readme = text_of("README.md").splitlines()
@@ -571,7 +569,9 @@ class WordsSayNotes(unittest.TestCase):
         for stale in ("Each key belongs to one writer", "reads and writes only its own pen",
                       "With a single agent and no setup"):
             self.assertNotIn(stale, readme)
-        for line in (AGENT_RULE, KEY_ROW, "docs/agents.md", "SCRIPTORIUM_AGENTS"):
+        for line in ("A key grants write access to every agent it is bound to",
+                     "a key bound to no agent grants access to extraction tools only",
+                     "docs/agents.md", "SCRIPTORIUM_AGENTS"):
             self.assertIn(line, readme)
 
     def test_documented_binding_opens_the_pen_for_one_agent(self):
@@ -597,25 +597,31 @@ class WordsSayNotes(unittest.TestCase):
                 proc = subprocess.run([sh, "-n"], input=block, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_journal_claims_match_the_code(self):
+    def test_entry_store_claims_match_the_code(self):
         readme = text_of("README.md")
         self.assertNotIn("Nothing from your chats is ever written into it", readme)
         self.assertNotIn("no one else writes in it", readme)
-        self.assertIn(JOURNAL_CLAIM, readme)
+        self.assertIn("The extraction tools reject paths inside the entry store", readme)
         for rel in ("README.md", "docs/how-it-works.md", "docs/how-it-works.svg"):
             self.assertNotIn("no one else writes", text_of(rel))
             self.assertNotIn("nothing from your chats", text_of(rel).lower())
 
-    def test_drawing_alt_is_final(self):
+    def test_drawing_and_alt_use_current_terms(self):
         readme = text_of("README.md")
         self.assertNotIn("to redo", readme.lower())
         alt = re.search(r'<img[^>]*src="docs/how-it-works\.svg"[^>]*alt="([^"]*)"', readme).group(1)
-        self.assertEqual(alt, ALT)
-        self.assertIn("journal", alt)
-        self.assertIn("The assistant", alt)
-        drawing = "".join(ET.parse(os.path.join(ROOT, "docs", "how-it-works.svg")).getroot().itertext())
-        self.assertIn("journal", drawing.lower())
-        self.assertIn("The assistant", drawing)
+        self.assertIn("writes entries", alt)
+        self.assertIn("checks excerpts against their source lines", alt)
+        self.assertIsNone(RETIRED_WORDS.search(alt))
+        svg = ET.parse(os.path.join(ROOT, "docs", "how-it-works.svg")).getroot()
+        drawing = "".join(svg.itertext())
+        self.assertIn("Your AI's entries", drawing)
+        self.assertIn("Antechamber", drawing)
+        self.assertIsNone(RETIRED_WORDS.search(drawing))
+        links = svg.findall(".//{http://www.w3.org/2000/svg}a")
+        self.assertTrue(links)
+        for link in links:
+            self.assertEqual(link.get("href"), ANTECHAMBER_URL)
         self.assertIsNone(re.search(r"(?i)memor", leftover(drawing)))
 
 

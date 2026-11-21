@@ -1,14 +1,14 @@
 # Agents
 
-An agent is the role or the identity a model speaks as. Each agent has its own pen: its own collections and entries. The name you give an agent is the name of its pen folder.
+An agent is the role or the identity a model speaks as. Each agent has its own collections and entries. The name you give an agent is the name of its folder under `pen/`.
 
 ## One or several agents per key
 
 A key can belong to one agent or to several.
 
 - A key with one agent works as it did in 1.3.0. The agent comes from the key, and a tool call that sends `agent` is refused with "unknown argument".
-- A key shared by several agents lists all seven pen tools with a required `agent` argument. It must be one of the agents on that key, spelled exactly as given. Each agent's entries stay separate from the others.
-- A key with no agent can use the extraction tools but not the pen.
+- A key shared by several agents lists all seven entry tools with a required `agent` argument. It must be one of the agents on that key, spelled exactly as given. Each agent's entries stay separate from the others.
+- A key with no agent can use the extraction tools only.
 
 Anyone holding a shared key can read, write, edit and delete entries for every agent on that key. Share a key only between agents that already share a chat.
 
@@ -81,13 +81,13 @@ Current tools:
 | two agents | 10 | 2446 | 5735 |
 ```
 
-A shared key adds one `agent` argument to each of the seven pen tools. `write_notes` is one more tool, and `write_memories` stays beside it as the old name.
+A shared key adds one `agent` argument to each of the seven entry tools. `write_notes` is one more tool, and `write_memories` stays beside it as the old name.
 
 ## Notebook sharing and surfaces
 
 These settings are JSON objects on the local server or in the cloud Worker's environment.
 
-- `SCRIPTORIUM_SILO={"Mira":{"journal":"silo","*":"pool"}}` keeps Mira's journal private and opens her other notebooks to the pool. Use `"*"` in the agent position to apply a rule to everyone. A rule for a named notebook wins over a rule for all notebooks. At the same level, a rule for a named agent wins over a rule for everyone. Use the exact notebook spelling.
+- `SCRIPTORIUM_SILO={"Mira":{"reflections":"silo","*":"pool"}}` keeps Mira's reflections private and opens her other notebooks to the pool. Use `"*"` in the agent position to apply a rule to everyone. A rule for a named notebook wins over a rule for all notebooks. At the same level, a rule for a named agent wins over a rule for everyone. Use the exact notebook spelling.
 - `SCRIPTORIUM_READS={"Echo":"own"}` lets Echo read only Echo's notebooks. Use `"pool"` to allow reading other agents' pooled notebooks. The default is `"pool"`. Agents can always read their own notebooks, including silos.
 - `SCRIPTORIUM_SURFACES={"DESKTOP_KEY":"desktop","WEB_KEY":"web"}` labels writes and edits by the key used. Use a separate key for each surface and bind each key to the agents who use it. The tools are the same across surfaces. Key references that resolve to the same secret must agree on its surface, including whether it has a label.
 

@@ -28,7 +28,9 @@ If your messages carry the author's account id (`sender_id`), a card can list `i
 
 Ids are used for matching only and are never sent to the model. The exact shapes are in `CONTRACT.md`.
 
-## Pen store
+<a name="pen-store"></a>
+
+## Entry store
 
 Set `SCRIPTORIUM_PEN_STORE` to an importable `module:attr` naming a store instance, a class, or a zero-argument factory. The MCP server requires all seven entry methods below. The instance must declare `contract_version = 2` for MCP. The transfer command uses `export_snapshot` and `import_snapshot`. The default implementation is `engine.pen.LocalFilesPenStore`. Configure keys as described in [Writers](writers.md).
 
