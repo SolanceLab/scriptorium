@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.1
+
+Wording only. The README now opens with the line between the two: Scriptorium writes (your agent's own notes by hand, and notes from your chats), and [Antechamber](https://github.com/SolanceLab/antechamber) finds and writes nothing. Reader-facing pages use plain words; file, skill, tool and setting names are unchanged. Checked that the notes writer writes nothing until you turn it on, and that a setup that turned it on stays on after upgrading.
+
 ## 1.7.0
 
 The four pen read tools can read another agent's pooled notebooks when you supply `of`. New notebooks start in the pool and existing notebooks start private. Set `SCRIPTORIUM_SILO='{"*":{"*":"pool"}}'` to open existing notebooks for everyone, or choose individual agents and notebooks in [Agents](docs/agents.md#notebook-sharing-and-surfaces). The same settings cover the local and cloud pens. Keys can label each version by surface, and transfers keep those labels and notebook defaults. Custom pen stores must declare contract version 2.
