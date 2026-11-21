@@ -11,7 +11,8 @@ import unicodedata
 import uuid
 from zoneinfo import ZoneInfo
 
-from engine.pen import LocalFilesPenStore, PenStore, validate_writer
+from engine.pen import (PEN_CONTRACT_VERSION, LocalFilesPenStore, PenStore,
+                        snapshot_parts, stamp_surface, validate_writer)
 
 _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS pen_versions ("
@@ -20,6 +21,10 @@ _SCHEMA = [
     "pinned INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY (writer, id, version))",
     "CREATE INDEX IF NOT EXISTS pen_versions_collection ON pen_versions (writer, collection, deleted)",
 ]
+_SCHEMA.append(
+    "CREATE TABLE IF NOT EXISTS pen_collections (writer TEXT NOT NULL, collection TEXT NOT NULL, "
+    "default_visibility TEXT NOT NULL, PRIMARY KEY (writer, collection))"
+)
 _COLUMNS = "writer, collection, id, version, deleted, created, created_us, by_day, pinned, record"
 
 
@@ -41,7 +46,11 @@ class Sqlite3Sql:
         """Run work() so that every statement in it is kept together, or none is (an error rolls them all back)."""
         if self.open:
             return work()
-        self.connection.execute('BEGIN')
+        import sqlite3
+        try:
+            self.connection.execute('BEGIN IMMEDIATE')
+        except sqlite3.Error as e:
+            raise OSError('storage failed: ' + str(e)) from e
         self.open = True
         try:
             result = work()
@@ -101,6 +110,8 @@ class DurableObjectSql:
 
 
 class SqlPenStore(PenStore):
+    contract_version = PEN_CONTRACT_VERSION
+
     # Reused from the local store so both stores judge an entry by the same rules.
     _valid_id = staticmethod(LocalFilesPenStore._valid_id)
     _fields = staticmethod(LocalFilesPenStore._fields)
@@ -140,7 +151,7 @@ class SqlPenStore(PenStore):
             raise ValueError('invalid collection name') from None
         validate_writer(writer)
         key = self._name_key(collection)
-        for row in self._run("SELECT DISTINCT collection FROM pen_versions WHERE writer = ?", (writer,)):
+        for row in self._run("SELECT collection FROM pen_versions WHERE writer = ? UNION SELECT collection FROM pen_collections WHERE writer = ?", (writer, writer)):
             if row['collection'] != collection and self._name_key(row['collection']) == key:
                 raise ValueError('collection names collide')
         return collection
@@ -179,14 +190,44 @@ class SqlPenStore(PenStore):
         return (record['writer'], record['collection'], record['id'], record['version'], int(deleted),
                 record['created'], _microseconds(record['created']), int(record['by_day']), int(record['pinned']), json.dumps(record, ensure_ascii=False))
 
-    def collections(self, writer):
-        validate_writer(writer)
-        rows = self._run(
-            "SELECT collection, MAX(by_day) AS by_day, COUNT(DISTINCT CASE WHEN deleted = 0 THEN id END) AS count "
-            "FROM pen_versions WHERE writer = ? GROUP BY collection ORDER BY collection", (writer,))
-        return [{'collection': r['collection'], 'count': r['count'], 'by_day': bool(r['by_day'])} for r in rows]
+    def _atomic(self, work):
+        self.ensure_ready()
+        return self.adapter.transaction(work)
 
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None):
+    def _default(self, writer, collection):
+        rows = self._run("SELECT default_visibility FROM pen_collections WHERE writer = ? AND collection = ?",
+                         (writer, collection))
+        return rows[0]['default_visibility'] if rows else 'silo'
+
+    def _authorize_id(self, writer, id, visible):
+        rows = self._run("SELECT collection FROM pen_versions WHERE writer = ? AND id = ? AND deleted = 0 LIMIT 1",
+                         (writer, id)) if self._valid_id(id) else []
+        if not rows:
+            raise ValueError('entry not found')
+        collection = rows[0]['collection']
+        if not visible(collection, self._default(writer, collection)):
+            raise ValueError('entry not found')
+
+    def collections(self, writer, *, visible=None):
+        validate_writer(writer)
+
+        def read():
+            rows = self._run(
+                "SELECT v.collection, MAX(v.by_day) AS by_day, "
+                "COUNT(DISTINCT CASE WHEN v.deleted = 0 THEN v.id END) AS count, "
+                "COALESCE(c.default_visibility, 'silo') AS default_visibility "
+                "FROM pen_versions v LEFT JOIN pen_collections c "
+                "ON c.writer = v.writer AND c.collection = v.collection "
+                "WHERE v.writer = ? GROUP BY v.collection ORDER BY v.collection", (writer,))
+            return [{'collection': r['collection'], 'count': r['count'], 'by_day': bool(r['by_day'])}
+                    for r in rows if visible is None or visible(r['collection'], r['default_visibility'])]
+
+        return self._atomic(read) if visible is not None else read()
+
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None):
+        return self._atomic(lambda: self._write(writer, collection, body, title, pinned, by_day, surface))
+
+    def _write(self, writer, collection, body, title, pinned, by_day, surface):
         self._fields(body, title, pinned)
         if by_day is not None and type(by_day) is not bool:
             raise ValueError('by_day must be a boolean')
@@ -202,16 +243,14 @@ class SqlPenStore(PenStore):
                   'by_day': mode if mode is not None else bool(by_day)}
         if title is not None:
             record['title'] = title
-        # One statement: refuses when another entry has set the collection's mode the other way meanwhile.
-        done = self._run(
-            f"INSERT INTO pen_versions ({_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
-            "WHERE NOT EXISTS (SELECT 1 FROM pen_versions WHERE writer = ? AND collection = ? AND by_day <> ?) RETURNING id",
-            self._row(record) + (writer, collection, int(record['by_day'])))
-        if not done:
-            raise ValueError('collection mode is already set')
+        stamp_surface(record, surface)
+        if mode is None:
+            self._run("INSERT OR IGNORE INTO pen_collections VALUES (?, ?, 'pool')", (writer, collection))
+        self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  self._row(record))
         return id
 
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None):
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)
         if type(based_on) is not int or based_on < 1:
             raise ValueError('invalid based_on')
@@ -229,6 +268,7 @@ class SqlPenStore(PenStore):
         if pinned is not None:
             record['pinned'] = pinned
         record.update(version=latest['version'] + 1, edited=self._now())
+        stamp_surface(record, surface)
         # One statement: appends only while the version we read is still the newest one (the atomic base check).
         done = self._run(
             f"INSERT INTO pen_versions ({_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
@@ -238,20 +278,42 @@ class SqlPenStore(PenStore):
             raise ValueError('version conflict')
         return record['version']
 
-    def read(self, writer, id, version=None):
+    def read(self, writer, id, version=None, *, visible=None):
+        if visible is not None:
+            def read():
+                self._authorize_id(writer, id, visible)
+                return self.read(writer, id, version)
+            validate_writer(writer)
+            return self._atomic(read)
         if version is not None and (type(version) is not int or version < 1):
             raise ValueError('invalid version')
         validate_writer(writer)
         return self._versions(writer, id, version)[-1]
 
-    def list(self, writer, collection, pinned_only=False, day=None, limit=20):
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None):
         if type(pinned_only) is not bool or type(limit) is not int or limit < 1:
             raise ValueError('invalid list filters')
         if day is not None and (not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day):
             raise ValueError('day must be YYYY-MM-DD')
-        self._collection(writer, collection)
-        if day is not None and self._mode(writer, collection) is False:
-            raise ValueError('day filter requires a by_day collection')
+        if visible is not None:
+            return self._atomic(lambda: self._list(writer, collection, pinned_only, day, limit, surface, visible))
+        return self._list(writer, collection, pinned_only, day, limit, surface, None)
+
+    def _list(self, writer, collection, pinned_only, day, limit, surface, visible):
+        try:
+            self._collection(writer, collection)
+        except ValueError:
+            if visible is None:
+                raise
+            raise ValueError('collection not found') from None
+        if visible is not None and not visible(collection, self._default(writer, collection)):
+            raise ValueError('collection not found')
+        if visible is not None or day is not None:
+            mode = self._mode(writer, collection)
+            if visible is not None and mode is None:
+                raise ValueError('collection not found')
+            if day is not None and mode is False:
+                raise ValueError('day filter requires a by_day collection')
         query = ("SELECT v.collection, v.id, v.version, v.record FROM pen_versions v "
                  "WHERE v.writer = ? AND v.collection = ? AND v.deleted = 0 "
                  "AND v.version = (SELECT MAX(version) FROM pen_versions m WHERE m.writer = v.writer AND m.id = v.id AND m.deleted = 0)")
@@ -261,6 +323,9 @@ class SqlPenStore(PenStore):
         if day is not None:
             query += " AND substr(v.created, 1, 10) = ?"
             params.append(day)
+        if surface is not None:
+            query += " AND json_extract(v.record, '$.surface') = ?"
+            params.append(surface)
         # Newest first and the limit are applied in SQL, so only `limit` bodies are ever loaded (a Worker has 128 MB).
         # Match the local store's entry ID order when creation instants tie.
         rows = self._run(query + " ORDER BY v.created_us DESC, v.id ASC LIMIT ?", params + [limit])
@@ -271,8 +336,13 @@ class SqlPenStore(PenStore):
             records.append(record)
         return records
 
-    def history(self, writer, id):
+    def history(self, writer, id, *, visible=None):
         validate_writer(writer)
+        if visible is not None:
+            def read():
+                self._authorize_id(writer, id, visible)
+                return self._versions(writer, id)
+            return self._atomic(read)
         return self._versions(writer, id)
 
     def delete(self, writer, id):
@@ -295,7 +365,26 @@ class SqlPenStore(PenStore):
             entry['versions'].append(record)
         return list(entries.values())
 
-    def import_pen(self, writer, records):
+    def _metadata(self, writer):
+        rows = self._run(
+            "SELECT collection, default_visibility FROM pen_collections WHERE writer = ? UNION ALL "
+            "SELECT DISTINCT collection, 'silo' FROM pen_versions v WHERE writer = ? AND NOT EXISTS "
+            "(SELECT 1 FROM pen_collections c WHERE c.writer = v.writer AND c.collection = v.collection)",
+            (writer, writer))
+        return {row['collection']: row['default_visibility'] for row in rows}
+
+    def export_snapshot(self, writer):
+        validate_writer(writer)
+        return self._atomic(lambda: {'version': 1, 'collections': self._metadata(writer),
+                                     'entries': self.export_pen(writer)})
+
+    def import_pen(self, writer, records, *, metadata=None):
+        if metadata is not None:
+            snapshot_parts({'version': 1, 'collections': metadata, 'entries': records})
+        # A transfer to SQL can roll back the entire snapshot and retry from scratch.
+        return self._atomic(lambda: self._import_pen(writer, records, metadata))
+
+    def _import_pen(self, writer, records, metadata):
         """Install missing entries after validating the snapshot and the existing subset (same rules as the local store)."""
         validate_writer(writer)
         incoming, modes, spellings = {}, {}, {}
@@ -329,6 +418,17 @@ class SqlPenStore(PenStore):
             if id in existing or incoming.get(id) != record:
                 raise ValueError(f'destination conflicts at {id}')
             existing[id] = record
+        if metadata is not None:
+            current = self._metadata(writer)
+            if any(metadata.get(name) != state for name, state in current.items()):
+                raise ValueError('destination conflicts in collection metadata')
+            for name, state in metadata.items():
+                self._collection(writer, name)
+                spelling = self._name_key(name)
+                if spellings.setdefault(spelling, name) != name:
+                    raise ValueError('collection names collide')
+                if name not in current:
+                    self._run("INSERT INTO pen_collections VALUES (?, ?, ?)", (writer, name, state))
         for id, record in incoming.items():
             if id in existing:
                 continue

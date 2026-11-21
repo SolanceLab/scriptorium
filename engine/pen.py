@@ -22,17 +22,53 @@ from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 
 
+PEN_CONTRACT_VERSION = 2
+
+
+def validate_surface(surface):
+    if not isinstance(surface, str) or not surface.strip():
+        raise ValueError('invalid surface')
+    surface.encode('utf-8')
+
+
+def stamp_surface(record, surface):
+    if surface is None:
+        record.pop('surface', None)
+    else:
+        validate_surface(surface)
+        record['surface'] = surface
+
+
+def snapshot_parts(snapshot):
+    if not isinstance(snapshot, dict) or snapshot.keys() != {'version', 'collections', 'entries'}:
+        raise ValueError('invalid transfer snapshot')
+    metadata = snapshot['collections']
+    entries = snapshot['entries']
+    if (type(snapshot['version']) is not int or snapshot['version'] != 1
+            or not isinstance(entries, list) or not isinstance(metadata, dict)
+            or any(not isinstance(entry, dict) or not isinstance(entry.get('collection'), str) for entry in entries)
+            or any(value not in ('pool', 'silo') for value in metadata.values())
+            or not {entry['collection'] for entry in entries} <= metadata.keys()):
+        raise ValueError('invalid collection metadata')
+    return entries, metadata
+
+
 class PenStore:
     """Hand-written record store contract; implementations scope every operation to writer."""
-    def collections(self, writer): raise NotImplementedError
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None): raise NotImplementedError
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None): raise NotImplementedError
-    def read(self, writer, id, version=None): raise NotImplementedError
-    def list(self, writer, collection, pinned_only=False, day=None, limit=20): raise NotImplementedError
-    def history(self, writer, id): raise NotImplementedError
+    def collections(self, writer, *, visible=None): raise NotImplementedError
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None): raise NotImplementedError
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None): raise NotImplementedError
+    def read(self, writer, id, version=None, *, visible=None): raise NotImplementedError
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): raise NotImplementedError
+    def history(self, writer, id, *, visible=None): raise NotImplementedError
     def delete(self, writer, id): raise NotImplementedError
     def export_pen(self, writer): raise NotImplementedError
-    def import_pen(self, writer, records): raise NotImplementedError
+    def import_pen(self, writer, records, *, metadata=None): raise NotImplementedError
+    def export_snapshot(self, writer): raise NotImplementedError
+
+    def import_snapshot(self, writer, snapshot):
+        entries, metadata = snapshot_parts(snapshot)
+        self.import_pen(writer, entries, metadata=metadata)
 
 
 def validate_writer(writer):
@@ -48,6 +84,8 @@ _thread_lock = threading.RLock()
 
 
 class LocalFilesPenStore(PenStore):
+    contract_version = PEN_CONTRACT_VERSION
+
     def __init__(self, root, timezone=None, clock=None):
         self.install_root = Path(root).resolve()
         self.root = self.install_root / 'pen'
@@ -166,15 +204,19 @@ class LocalFilesPenStore(PenStore):
                 or header['version'] != version or type(header.get('by_day')) is not bool):
             raise ValueError('invalid entry header')
         self._fields(body, header.get('title'), header.get('pinned'))
+        if 'surface' in header:
+            validate_surface(header['surface'])
         for field in ('created', 'edited'):
             value = header.get(field)
             if not isinstance(value, str) or dt.datetime.fromisoformat(value).utcoffset() is None:
                 raise ValueError('invalid entry timestamp')
 
-    def _find(self, writer, id):
+    def _find(self, writer, id, visible=None):
         if not self._valid_id(id):
-            raise ValueError('invalid id')
+            raise ValueError('invalid id' if visible is None else 'entry not found')
         for directory in self._collections(writer):
+            if visible is not None and not visible(directory.name, self._default(directory)):
+                continue
             path = self._checked(self._collection(writer, directory.name) / id)
             if path.exists():
                 return path
@@ -190,10 +232,22 @@ class LocalFilesPenStore(PenStore):
             raise ValueError('inconsistent collection mode')
         return records[:len(active)], records[0]['by_day'] if records else None
 
-    def collections(self, writer):
+    def _default(self, directory):
+        marker = self._checked(directory / '.pool')
+        return 'pool' if marker.is_file() else 'silo'
+
+    def _exists(self, directory):
+        if not directory.is_dir():
+            return False
+        archive = self._checked(directory / '.deleted')
+        return bool(self._entries(directory) or (archive.is_dir() and self._entries(archive)))
+
+    def collections(self, writer, *, visible=None):
         with self._lock(writer):
             result = []
             for directory in self._collections(writer):
+                if visible is not None and not visible(directory.name, self._default(directory)):
+                    continue
                 entries, by_day = self._collection_records(writer, self._collection(writer, directory.name))
                 if by_day is not None:
                     result.append({'collection': directory.name, 'count': len(entries), 'by_day': by_day})
@@ -213,7 +267,7 @@ class LocalFilesPenStore(PenStore):
             if staging.exists():
                 shutil.rmtree(staging)
 
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None):
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None):
         self._fields(body, title, pinned)
         if by_day is not None and type(by_day) is not bool:
             raise ValueError('by_day must be a boolean')
@@ -229,10 +283,23 @@ class LocalFilesPenStore(PenStore):
                       'by_day': mode if mode is not None else bool(by_day)}
             if title is not None:
                 record['title'] = title
-            self._install_entry(directory / id, [record])
+            stamp_surface(record, surface)
+            if mode is None and not directory.exists():
+                staging = Path(tempfile.mkdtemp(prefix='.pen-', dir=directory.parent))
+                try:
+                    (staging / '.pool').touch()
+                    self._install_entry(staging / id, [record])
+                    os.replace(staging, directory)
+                finally:
+                    if staging.exists():
+                        shutil.rmtree(staging)
+            else:
+                if mode is None and not self._checked(directory / '.silo').exists():
+                    self._checked(directory / '.pool').touch()
+                self._install_entry(directory / id, [record])
             return id
 
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None):
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)
         if type(based_on) is not int or based_on < 1:
             raise ValueError('invalid based_on')
@@ -249,35 +316,49 @@ class LocalFilesPenStore(PenStore):
             if pinned is not None:
                 record['pinned'] = pinned
             record.update(version=latest + 1, edited=self._now())
+            stamp_surface(record, surface)
             self._save(path / f'{latest + 1}.md', record)
             return latest + 1
 
-    def read(self, writer, id, version=None):
-        if version is not None and (type(version) is not int or version < 1):
+    def read(self, writer, id, version=None, *, visible=None):
+        invalid = version is not None and (type(version) is not int or version < 1)
+        if invalid and visible is None:
             raise ValueError('invalid version')
         with self._lock(writer):
-            path = self._find(writer, id)
+            path = self._find(writer, id, visible)
+            if invalid:
+                raise ValueError('invalid version')
             latest = self._versions(path)[-1]
             if version is not None and version > latest:
                 raise ValueError('version not found')
             return self._record(writer, path.parent.name, path, version or latest)
 
-    def list(self, writer, collection, pinned_only=False, day=None, limit=20):
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None):
         if type(pinned_only) is not bool or type(limit) is not int or limit < 1:
             raise ValueError('invalid list filters')
         if day is not None and (not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day):
             raise ValueError('day must be YYYY-MM-DD')
         with self._lock(writer):
-            entries, by_day = self._collection_records(writer, self._collection(writer, collection))
+            try:
+                directory = self._collection(writer, collection)
+            except ValueError:
+                if visible is None:
+                    raise
+                raise ValueError('collection not found') from None
+            if visible is not None and (not visible(collection, self._default(directory))
+                                        or not self._exists(directory)):
+                raise ValueError('collection not found')
+            entries, by_day = self._collection_records(writer, directory)
             if day is not None and by_day is False:
                 raise ValueError('day filter requires a by_day collection')
             matches = (r for r in entries if (not pinned_only or r['pinned'])
-                       and (day is None or r['created'][:10] == day))
+                       and (day is None or r['created'][:10] == day)
+                       and (surface is None or r.get('surface') == surface))
             return sorted(matches, key=lambda r: dt.datetime.fromisoformat(r['created']), reverse=True)[:limit]
 
-    def history(self, writer, id):
+    def history(self, writer, id, *, visible=None):
         with self._lock(writer):
-            path = self._find(writer, id)
+            path = self._find(writer, id, visible)
             return [self._record(writer, path.parent.name, path, v) for v in self._versions(path)]
 
     def delete(self, writer, id):
@@ -308,8 +389,20 @@ class LocalFilesPenStore(PenStore):
                                    'deleted': deleted, 'versions': versions})
         return result
 
-    def import_pen(self, writer, records):
+    def _metadata(self, writer):
+        return {directory.name: self._default(directory) for directory in self._collections(writer)
+                if self._exists(directory) or self._checked(directory / '.silo').is_file()
+                or self._checked(directory / '.pool').is_file()}
+
+    def export_snapshot(self, writer):
+        with self._lock(writer):
+            return {'version': 1, 'collections': self._metadata(writer),
+                    'entries': self._export_locked(writer)}
+
+    def import_pen(self, writer, records, *, metadata=None):
         """Install missing entries after validating the snapshot and existing subset."""
+        if metadata is not None:
+            snapshot_parts({'version': 1, 'collections': metadata, 'entries': records})
         with self._lock(writer):
             incoming = {}
             paths = {}
@@ -348,6 +441,21 @@ class LocalFilesPenStore(PenStore):
                 if id in existing or incoming.get(id) != record:
                     raise ValueError(f'destination conflicts at {id}')
                 existing[id] = record
+            if metadata is not None:
+                current = self._metadata(writer)
+                if any(metadata.get(name) != state for name, state in current.items()):
+                    raise ValueError('destination conflicts in collection metadata')
+                directories = {}
+                for name in metadata:
+                    directory = self._collection(writer, name)
+                    spelling = self._name_key(name)
+                    if spellings.setdefault(spelling, name) != name:
+                        raise ValueError('collection names collide')
+                    directories[name] = directory
+                for name, directory in directories.items():
+                    if name not in current:
+                        directory.mkdir(exist_ok=True)
+                        self._checked(directory / ('.' + metadata[name])).touch()
             for id, record in incoming.items():
                 if id not in existing:
                     self._install_entry(paths[id], record['versions'])
@@ -371,17 +479,27 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         validate_writer(args.writer)
-        records = load_store(args.source).export_pen(args.writer)
+        source = load_store(args.source)
+        if getattr(source, 'contract_version', None) == PEN_CONTRACT_VERSION:
+            snapshot = source.export_snapshot(args.writer)
+        else:
+            records = source.export_pen(args.writer)
+            snapshot = {'version': 1, 'entries': records,
+                        'collections': {record['collection']: 'silo' for record in records}}
+        records = snapshot['entries']
         destination = load_store(args.destination)
+        if getattr(destination, 'contract_version', None) != PEN_CONTRACT_VERSION:
+            raise ValueError(f'destination must declare contract_version = {PEN_CONTRACT_VERSION} to preserve collection metadata')
     except Exception as e:
         parser.exit(1, f'Transfer failed before copying: {e}\n')
     try:
-        destination.import_pen(args.writer, records)
+        destination.import_snapshot(args.writer, snapshot)
         # Entry ordering can differ between stores. Version ordering is part of each record.
         def by_id(record):
             return record['id']
 
-        if sorted(destination.export_pen(args.writer), key=by_id) != sorted(records, key=by_id):
+        copied = destination.export_snapshot(args.writer)
+        if dict(copied, entries=sorted(copied['entries'], key=by_id)) != dict(snapshot, entries=sorted(records, key=by_id)):
             raise ValueError('destination does not match the source snapshot')
     except Exception as e:
         try:

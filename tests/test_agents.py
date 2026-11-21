@@ -45,8 +45,9 @@ class Base(unittest.TestCase):
         patch = mock.patch.dict(os.environ, dict(CLEAR, ONE_KEY=ONE, SHARED_KEY=SHARED))
         patch.start()
         self.addCleanup(patch.stop)
-        saved = (server.Config.keys, server.Config.shared_tools, server.Config.pen)
-        self.addCleanup(lambda: [setattr(server.Config, n, v) for n, v in zip(('keys', 'shared_tools', 'pen'), saved)])
+        names = ('keys', 'shared_tools', 'pen', 'surfaces', 'policy')
+        saved = {name: getattr(server.Config, name) for name in names}
+        self.addCleanup(lambda: [setattr(server.Config, name, value) for name, value in saved.items()])
 
     def configure(self, writers):
         server.configure(self.tmp, PRIMARY, writers)
@@ -76,6 +77,16 @@ class ConfigureTests(Base):
         self.configure({'PRIMARY_REF': ['first', 'second']})
         self.assertEqual(server.Config.keys[PRIMARY], ('first', 'second'))
         self.assertIn(('first', 'second'), server.Config.shared_tools)
+
+    def test_notebook_setting_precedence(self):
+        pooled = server.pooled
+        self.assertFalse(pooled({}, 'first', 'legacy', 'silo'))
+        self.assertTrue(pooled({'*': {'*': 'pool'}}, 'first', 'legacy', 'silo'))
+        silo = {'*': {'*': 'pool', 'journal': 'silo'}, 'first': {'*': 'silo', 'journal': 'pool'}}
+        self.assertTrue(pooled(silo, 'first', 'journal', 'silo'))
+        self.assertFalse(pooled(silo, 'first', 'other', 'pool'))
+        self.assertFalse(pooled(silo, 'second', 'journal', 'pool'))
+        self.assertTrue(pooled(silo, 'second', 'other', 'silo'))
 
     def test_same_agents_in_another_order_keep_the_first_order(self):
         os.environ['SHARED_KEY'] = ONE
@@ -142,6 +153,64 @@ class SharedToolTests(Base):
         listed = post(SHARED, 'tools/call', {'name': 'pen_collections', 'arguments': {'agent': 'first'}})
         self.assertEqual(listed['content'][0]['text'], '[]')
         self.assertTrue(post(SHARED, 'tools/call', {'name': 'pen_collections', 'arguments': {}})['isError'])
+
+    def test_pool_and_silos_over_http(self):
+        settings = {
+            'SCRIPTORIUM_SILO': json.dumps({'*': {'*': 'silo'}, 'second': {'shown': 'pool'}}),
+            'SCRIPTORIUM_SURFACES': json.dumps({'SHARED_KEY': 'desktop'}),
+        }
+        with mock.patch.dict(os.environ, settings):
+            self.configure({'SHARED_KEY': ['first', 'second'], 'ONE_KEY': 'first'})
+        http_server = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(http_server.shutdown)
+
+        def call(tool, args, key=SHARED):
+            conn = http.client.HTTPConnection('127.0.0.1', http_server.server_port)
+            try:
+                body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                                   'params': {'name': tool, 'arguments': args}})
+                conn.request('POST', '/mcp', body, {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+                result = json.loads(conn.getresponse().read())['result']
+                text = result['content'][0]['text']
+                return text if result['isError'] else json.loads(text)
+            finally:
+                conn.close()
+
+        hidden = call('pen_write', {'agent': 'second', 'collection': 'hidden', 'body': 'private'})['id']
+        shown = call('pen_write', {'agent': 'second', 'collection': 'shown', 'body': 'shared'})['id']
+        owner = {'of': 'second'}
+        self.assertEqual(call('pen_read', dict(owner, id=shown), ONE)['surface'], 'desktop')
+        self.assertEqual(call('pen_history', dict(owner, id=shown), ONE)[0]['id'], shown)
+        self.assertEqual(call('pen_list', dict(owner, collection='shown', surface='desktop'), ONE)[0]['id'], shown)
+        self.assertEqual([r['collection'] for r in call('pen_collections', owner, ONE)], ['shown'])
+        self.assertEqual(call('pen_collections', {}, ONE), [])
+        for tool in ('pen_read', 'pen_history'):
+            self.assertEqual(call(tool, dict(owner, id=hidden), ONE),
+                             call(tool, dict(owner, id='f' * 32), ONE))
+        self.assertEqual(call('pen_list', dict(owner, collection='hidden'), ONE),
+                         call('pen_list', dict(owner, collection='missing'), ONE))
+        self.assertEqual(call('pen_read', dict(owner, agent='second', id=hidden))['body'], 'private')
+        self.assertEqual(call('pen_collections', owner), 'agent is required: one of first, second')
+        self.assertEqual(call('pen_collections', owner, PRIMARY), 'no writer is assigned to this key')
+        self.assertEqual(call('pen_collections', {'of': 'Second'}, ONE), 'unknown agent')
+        for tool, args in [('pen_edit', {'id': hidden, 'based_on': 1}), ('pen_delete', {'id': hidden}),
+                           ('pen_write', {'collection': 'hidden', 'body': 'foreign'})]:
+            self.assertEqual(call(tool, dict(owner, **args), ONE), 'unknown argument')
+        self.assertEqual(call('pen_delete', {'id': hidden}, ONE), 'entry not found')
+        self.assertEqual(call('pen_edit', {'id': hidden, 'based_on': 1}, ONE), 'entry not found')
+
+        settings['SCRIPTORIUM_READS'] = json.dumps({'first': 'own', 'second': 'own'})
+        with mock.patch.dict(os.environ, settings):
+            self.configure({'SHARED_KEY': ['first', 'second'], 'ONE_KEY': 'first'})
+        self.assertEqual(call('pen_read', dict(owner, id=shown), ONE), 'this agent can only read its own notebooks')
+        self.assertEqual(call('pen_read', dict(owner, agent='second', id=hidden))['body'], 'private')
+        self.assertEqual(call('pen_read', {'agent': 'second', 'id': hidden})['body'], 'private')
+        self.assertEqual(call('pen_collections', {'of': 'first'}, ONE), [])
+
 
 
 def clean_env():

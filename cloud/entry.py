@@ -34,7 +34,7 @@ _REQUESTS = ("CREATE TABLE IF NOT EXISTS cloud_requests (rid TEXT PRIMARY KEY, w
              "created_at REAL NOT NULL, response TEXT NOT NULL)")
 
 
-def load_keys(env_get):
+def load_keys(env_get, *, with_policy=False):
     """({key: agents tuple or None}, None) for a good setup, or ({}, plain reason) when the Worker must not serve."""
     key = env_get(KEY_ENV) or ""
     if len(key) < 16:
@@ -48,6 +48,7 @@ def load_keys(env_get):
     if not isinstance(writers, dict):
         return {}, AGENTS_ENV + " must be a JSON object"
     folded = {}
+    references = {}
     for ref, writer in writers.items():
         if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ref):
             return {}, "invalid key reference"
@@ -68,17 +69,26 @@ def load_keys(env_get):
             normal = unicodedata.normalize("NFD", name).casefold()
             if folded.setdefault(normal, name) != name:
                 return {}, "writer names collide"
+        references[ref] = secret
         current = keys.get(secret)
         if current is not None and set(current) != set(names):
             return {}, "one key cannot map to different agents"
         if current is None:
             keys[secret] = tuple(names)
+    if KEY_ENV not in references and key not in references.values():
+        references[KEY_ENV] = key
+    try:
+        policy, surfaces = server.pen_settings(env_get, folded.values(), references)
+    except ValueError as e:
+        return {}, str(e)
+    if with_policy:
+        keys = {secret: (agents, surfaces.get(secret), policy) for secret, agents in keys.items()}
     return keys, None
 
 
-def admit(env_get, method, path, header_get):
+def admit(env_get, method, path, header_get, *, with_policy=False):
     """(None, agents) when the request may go on, else (status, plain message)."""
-    keys, problem = load_keys(env_get)
+    keys, problem = load_keys(env_get, with_policy=with_policy)
     if problem:
         return 503, problem
     if method != "POST":
@@ -104,14 +114,14 @@ def _error(rid, code, message):
     return server._error(rid, code, message)
 
 
-def cloud_handle(msg, agents):
+def cloud_handle(msg, agents, **context):
     """server.handle, with the chat tools hidden from tools/list and refused in tools/call."""
     method = msg.get("method") if isinstance(msg, dict) else None
     params = msg.get("params") if isinstance(msg, dict) else None
     if method == "tools/call" and isinstance(params, dict) and isinstance(params.get("name"), str) \
             and params["name"] in CHAT_NAMES and msg.get("id") is not None:
         return _error(msg["id"], -32602, f"unknown tool: {params['name']}")
-    answer = server.handle(msg, agents)
+    answer = server.handle(msg, agents, **context)
     if method == "tools/list" and isinstance(answer, dict) and "result" in answer:
         answer["result"]["tools"] = [t for t in answer["result"]["tools"] if t["name"] in PEN_NAMES]
     return answer
@@ -119,15 +129,6 @@ def cloud_handle(msg, agents):
 
 def _failed(answer):
     return "error" in answer or bool(answer.get("result", {}).get("isError"))
-
-
-def _handle(store, body, agents):
-    previous = server.Config.pen
-    server.Config.pen = store
-    try:
-        return cloud_handle(body, agents)
-    finally:
-        server.Config.pen = previous
 
 
 def _reply(answer):
@@ -155,7 +156,7 @@ def _request_rpc_id(body_text):
         return None
 
 
-def serve(store, body_text, agents, request_id=""):
+def serve(store, body_text, agents, request_id="", *, surface=None, policy=None):
     """Handle an admitted request, committing each retryable write and its reply together."""
     size = len(body_text.encode("utf-8"))
     if size > server.MAX_BODY:
@@ -168,16 +169,19 @@ def serve(store, body_text, agents, request_id=""):
         return 400, json.dumps(_error(None, -32700, "parse error"))
     if isinstance(body, list):
         return 400, json.dumps(_error(None, -32600, "batches are not supported"))
+    context = dict(store=store, surface=surface, policy=policy or (frozenset(agents or ()), {}, {}))
     params = _write_call(body)
     if params is None:
-        return _reply(_handle(store, body, agents))
+        return _reply(cloud_handle(body, agents, **context))
 
     args = params.get("arguments", {})
     named = args.get("agent") if isinstance(args, dict) else None
     writer = agents[0] if agents and len(agents) == 1 else named
     def fingerprint(actor):
-        canonical = json.dumps({"name": params["name"], "arguments": args, "agent": actor},
-                               sort_keys=True, separators=(",", ":"))
+        fields = {"name": params["name"], "arguments": args, "agent": actor}
+        if surface is not None:
+            fields["surface"] = surface
+        canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     digest = fingerprint(writer) if request_id else None
@@ -200,7 +204,7 @@ def serve(store, body_text, agents, request_id=""):
                 answer = json.loads(saved["response"])
                 answer["id"] = rid
                 return _reply(answer)
-        answer = _handle(store, body, agents)
+        answer = cloud_handle(body, agents, **context)
         status, text = _reply(answer)
         if request_id and answer is not None and not _failed(answer):
             saved = text if len(text.encode("utf-8")) <= MAX_SAVED else json.dumps(_error(
@@ -220,10 +224,11 @@ class PenObject(DurableObject):
         tz = getattr(env, TZ_ENV, None)
         self.store = SqlPenStore(DurableObjectSql(ctx.storage.sql, ctx.storage), str(tz) if tz else None)
 
-    async def call(self, body, agents_json, request_id):
-        agents = tuple(json.loads(agents_json)) or None
+    async def call(self, body, context_json, request_id):
+        agents, surface, policy = json.loads(context_json)
+        agents = tuple(agents) if agents else None
         try:
-            status, text = serve(self.store, body, agents, request_id)
+            status, text = serve(self.store, body, agents, request_id, surface=surface, policy=policy)
         except Exception:
             status, text = 500, json.dumps(_error(_request_rpc_id(body), -32603, "the pen could not answer"))
         return json.dumps({"status": status, "text": text})
@@ -237,15 +242,16 @@ class Default(WorkerEntrypoint):
     async def fetch(self, request):
         from urllib.parse import urlparse
         env_get = lambda name: (lambda v: str(v) if v is not None else None)(getattr(self.env, name, None))
-        refused, found = admit(env_get, request.method, urlparse(request.url).path, request.headers.get)
+        refused, found = admit(env_get, request.method, urlparse(request.url).path, request.headers.get, with_policy=True)
         if refused == 401:
             return Response(None, status=401, headers={"www-authenticate": "Bearer"})
         if refused:
             return _plain(refused, found)
-        agents = found
+        agents, surface, (configured, silo, reads) = found
+        context = json.dumps([agents, surface, [sorted(configured), silo, reads]])
         body = await request.text()
         stub = self.env.PEN.getByName(PEN_OBJECT)
-        out = json.loads(await stub.call(body, json.dumps(list(agents or ())),
+        out = json.loads(await stub.call(body, context,
                                     request.headers.get("x-request-id") or ""))
         if out["status"] == 202:
             return Response(None, status=202)

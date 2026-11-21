@@ -188,15 +188,46 @@ class PenTests(unittest.TestCase):
                     main(self.transfer_args(dest, 'alpha'))
             self.assertIn('destination does not match the source snapshot', stderr.getvalue())
 
+    def test_transfer_verifies_collection_metadata_on_readback(self):
+        self.store.write('alpha', 'notes', 'pooled')
+        install = LocalFilesPenStore.import_snapshot
+
+        def omit_default(store, writer, snapshot):
+            install(store, writer, snapshot)
+            (store.root / writer / 'notes' / '.pool').unlink()
+
+        with tempfile.TemporaryDirectory() as dest, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with mock.patch.object(LocalFilesPenStore, 'import_snapshot', omit_default), self.assertRaises(SystemExit):
+                main(self.transfer_args(dest, 'alpha'))
+            self.assertIn('destination does not match the source snapshot', stderr.getvalue())
+
+    def test_transfer_accepts_legacy_source_but_requires_metadata_capable_destination(self):
+        id = self.store.write('alpha', 'notes', 'source')
+        legacy = mock.Mock(spec=['export_pen', 'import_pen'])
+        legacy.export_pen.return_value = self.store.export_pen('alpha')
+        with tempfile.TemporaryDirectory() as dest, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            target = LocalFilesPenStore(dest)
+            with mock.patch.object(pen_module, 'load_store', side_effect=[legacy, target]):
+                main(self.transfer_args(dest, 'alpha'))
+            self.assertEqual(target.export_snapshot('alpha')['collections'], {'notes': 'silo'})
+            self.assertEqual(target.read('alpha', id)['body'], 'source')
+            with mock.patch.object(pen_module, 'load_store', side_effect=[target, legacy]):
+                with self.assertRaises(SystemExit):
+                    main(self.transfer_args(dest, 'alpha'))
+            self.assertIn('destination must declare contract_version = 2', stderr.getvalue())
+            legacy.import_pen.assert_not_called()
+
     def test_transfer_accepts_different_entry_order(self):
         self.seed_transfer()
         with tempfile.TemporaryDirectory() as dest:
             target = LocalFilesPenStore(dest)
             source = mock.Mock()
-            source.export_pen.return_value = list(reversed(self.store.export_pen('alpha')))
+            source.contract_version = pen_module.PEN_CONTRACT_VERSION
+            snapshot = self.store.export_snapshot('alpha')
+            source.export_snapshot.return_value = dict(snapshot, entries=list(reversed(snapshot['entries'])))
             with mock.patch.object(pen_module, 'load_store', side_effect=[source, target]):
                 main(self.transfer_args(dest, 'alpha'))
-            self.assertEqual(target.export_pen('alpha'), self.store.export_pen('alpha'))
+            self.assertEqual(target.export_snapshot('alpha'), snapshot)
 
     def test_explicit_read_rejects_a_gap_in_version_history(self):
         id = self.store.write('alpha', 'notes', 'first')
@@ -401,6 +432,14 @@ class PenTests(unittest.TestCase):
                 server.configure(self.tmp.name, 'c' * 32, {'TEST_PEN_A_KEY': 'alpha', 'TEST_PEN_B_KEY': 'beta'})
         with self.assertRaises(SystemExit):
             server.configure(self.tmp.name, 'c' * 32, {'TEST_PEN_A_KEY': 'Alpha', 'TEST_PEN_B_KEY': 'alpha'})
+
+    def test_old_custom_store_contract_is_refused(self):
+        module = type(sys)('pen_fixture')
+        module.store = self.store
+        with mock.patch.dict(sys.modules, {'pen_fixture': module}):
+            with mock.patch.object(self.store, 'contract_version', 1):
+                with self.assertRaisesRegex(SystemExit, 'contract_version = 2'):
+                    server.configure(self.tmp.name, 'c' * 32, {}, 'pen_fixture:store')
 
     def test_incomplete_custom_store_refused(self):
         module = type(sys)('pen_fixture')

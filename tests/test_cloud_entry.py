@@ -2,6 +2,7 @@
 """The Cloudflare entry's logic (cloud/entry.py) without Cloudflare: keys, agents, request ids, pen tools only."""
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -53,6 +54,34 @@ class KeyTests(unittest.TestCase):
             self.assertIn('SCRIPTORIUM_MCP_KEY', message)
         status, _ = self.admit(env(SCRIPTORIUM_MCP_KEY=MAIN, SCRIPTORIUM_AGENTS=json.dumps({'A': 'alpha'}), A='tiny'))
         self.assertEqual(status, 503)
+
+    def test_invalid_pool_and_surface_settings_are_refused_on_both_servers(self):
+        base = {entry.KEY_ENV: MAIN, 'A': A_KEY, 'ALIAS': A_KEY,
+                entry.AGENTS_ENV: json.dumps({'A': 'alpha', 'ALIAS': 'alpha'})}
+        cases = [
+            ('SCRIPTORIUM_SILO', []),
+            ('SCRIPTORIUM_SILO', {'ghost': {'*': 'silo'}}),
+            ('SCRIPTORIUM_SILO', {'alpha': 'pool'}),
+            ('SCRIPTORIUM_SILO', {'alpha': {'notes': 'default'}}),
+            ('SCRIPTORIUM_SILO', {'alpha': {'Notes': 'silo', 'notes': 'pool'}}),
+            ('SCRIPTORIUM_READS', {'ghost': 'own'}),
+            ('SCRIPTORIUM_READS', {'alpha': 'silo'}),
+            ('SCRIPTORIUM_SURFACES', {'UNKNOWN': 'web'}),
+            ('SCRIPTORIUM_SURFACES', {'A': 4}),
+            ('SCRIPTORIUM_SURFACES', {'A': ''}),
+            ('SCRIPTORIUM_SURFACES', {'A': 'web', 'ALIAS': 'desktop'}),
+            ('SCRIPTORIUM_SURFACES', {'A': 'web'}),
+        ]
+        for name, value in cases:
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as tmp:
+                values = dict(base, **{name: json.dumps(value)})
+                self.assertEqual(self.admit(values.get)[0], 503)
+                with mock.patch.dict(os.environ, values), self.assertRaises(SystemExit):
+                    server.configure(tmp, MAIN, json.loads(base[entry.AGENTS_ENV]))
+        valid = dict(base, SCRIPTORIUM_SURFACES=json.dumps({'A': 'web', 'ALIAS': 'web'}))
+        keys, problem = entry.load_keys(valid.get, with_policy=True)
+        self.assertIsNone(problem)
+        self.assertEqual(keys[A_KEY][:2], (('alpha',), 'web'))
 
     def test_wrong_and_missing_keys_are_refused_and_right_ones_pass(self):
         self.assertEqual(self.admit(key='x' * 20)[0], 401)
@@ -332,6 +361,22 @@ class ServeTests(unittest.TestCase):
         self.assertEqual(self.serve(body, request_id='r')[0], 200)
         self.assertEqual(len(self.store.export_pen('alpha')), 1)
 
+    def test_failed_first_entry_rolls_back_collection_metadata(self):
+        body = call('pen_write', {'collection': 'notes', 'body': 'x'})
+        real = self.store.adapter.run
+
+        def fail_entry(query, params=()):
+            if query.startswith('INSERT INTO pen_versions'):
+                raise OSError('injected entry failure')
+            return real(query, params)
+
+        with mock.patch.object(self.store.adapter, 'run', fail_entry):
+            with self.assertRaisesRegex(OSError, 'injected entry failure'):
+                self.serve(body, request_id='first')
+        self.assertEqual(self.store.export_snapshot('alpha'), {'version': 1, 'collections': {}, 'entries': []})
+        self.assertEqual(self.serve(body, request_id='first')[0], 200)
+        self.assertEqual(self.store.export_snapshot('alpha')['collections'], {'notes': 'pool'})
+
     def test_canonical_retry_ignores_json_order_formatting_and_rpc_id(self):
         args = {'collection': 'notes', 'body': 'one'}
         first = self.serve(call('pen_write', args, 3), request_id='canonical')
@@ -457,6 +502,58 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(response.body)['id'], 0)
         self.assertEqual(self.pen.store.list('alpha', 'notes')[0]['body'], 'hello')
         self.binding.getByName.assert_called_with('pen')
+
+    async def test_pool_reads_and_surface_retries_at_worker_boundary(self):
+        self.worker.env.SHARED = 's' * 20
+        self.worker.env.SCRIPTORIUM_AGENTS = json.dumps({'A': 'alpha', 'B': 'alpha',
+                                                        'SHARED': ['alpha', 'beta']})
+        self.worker.env.SCRIPTORIUM_SURFACES = json.dumps({'A': 'desktop', 'SHARED': 'web'})
+        self.worker.env.SCRIPTORIUM_SILO = json.dumps({'*': {'*': 'pool'}, 'beta': {'hidden': 'silo'}})
+
+        async def tool(name, args, key=A_KEY, request_id=None):
+            answer = await self.fetch(call(name, args), key=key, request_id=request_id)
+            if answer.status != 200:
+                return answer.status
+            result = json.loads(answer.body)['result']
+            text = result['content'][0]['text']
+            return text if result['isError'] else json.loads(text)
+
+        shared = self.worker.env.SHARED
+        shown = (await tool('pen_write', {'agent': 'beta', 'collection': 'shown', 'body': 'shared'}, shared))['id']
+        hidden = (await tool('pen_write', {'agent': 'beta', 'collection': 'hidden', 'body': 'private'}, shared))['id']
+        owner = {'of': 'beta'}
+        self.assertEqual((await tool('pen_read', dict(owner, id=shown)))['surface'], 'web')
+        self.assertEqual((await tool('pen_history', dict(owner, id=shown)))[0]['id'], shown)
+        self.assertEqual((await tool('pen_list', dict(owner, collection='shown', surface='web')))[0]['id'], shown)
+        self.assertEqual([r['collection'] for r in await tool('pen_collections', owner)], ['shown'])
+        for name in ('pen_read', 'pen_history'):
+            self.assertEqual(await tool(name, dict(owner, id=hidden)),
+                             await tool(name, dict(owner, id='f' * 32)))
+        self.assertEqual(await tool('pen_list', dict(owner, collection='hidden')),
+                         await tool('pen_list', dict(owner, collection='missing')))
+        self.assertEqual(await tool('pen_collections', owner, MAIN), 'no writer is assigned to this key')
+        self.assertEqual(await tool('pen_collections', owner, shared), 'agent is required: one of alpha, beta')
+        self.assertEqual(await tool('pen_collections', dict(owner, agent='gamma'), shared),
+                         'agent must be one of alpha, beta')
+        self.assertEqual(await tool('pen_collections', {'of': 'Beta'}), 'unknown agent')
+        self.worker.env.SCRIPTORIUM_READS = json.dumps({'alpha': 'own', 'beta': 'own'})
+        self.assertEqual(await tool('pen_collections', owner), 'this agent can only read its own notebooks')
+        self.assertEqual((await tool('pen_read', dict(owner, agent='beta', id=hidden), shared))['body'], 'private')
+        self.assertEqual((await tool('pen_read', {'agent': 'beta', 'id': hidden}, shared))['body'], 'private')
+
+        invalid = {'collection': 'notes', 'body': 'hello', 'visibility': 'silo'}
+        self.assertEqual(await tool('pen_write', invalid, request_id='write'), 'unknown argument')
+        del invalid['visibility']
+        first = await tool('pen_write', invalid, request_id='write')
+        self.assertEqual(await tool('pen_write', invalid, request_id='write'), first)
+        self.assertEqual(await tool('pen_write', invalid, B_KEY, request_id='write'), 409)
+        edit = {'id': first['id'], 'based_on': 1, 'body': 'plain'}
+        self.assertEqual(await tool('pen_edit', edit, B_KEY, request_id='edit'), {'version': 2})
+        self.assertEqual(await tool('pen_edit', edit, B_KEY, request_id='edit'), {'version': 2})
+        self.assertEqual(await tool('pen_edit', edit, A_KEY, request_id='edit'), 409)
+        self.assertEqual([r.get('surface') for r in await tool('pen_history', {'id': first['id']})],
+                         ['desktop', None])
+        self.assertEqual(len(self.pen.store.export_pen('alpha')), 1)
 
     async def test_key_rotation_overlaps_then_removes_the_old_key(self):
         body = call('pen_write', {'collection': 'notes', 'body': 'kept'})

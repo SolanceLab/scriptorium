@@ -33,6 +33,60 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/.
 MAX_LIMIT = 50
 AGENTS_ENV = "SCRIPTORIUM_AGENTS"
+READS_ENV = "SCRIPTORIUM_READS"
+SURFACES_ENV = "SCRIPTORIUM_SURFACES"
+SILO_ENV = "SCRIPTORIUM_SILO"
+
+
+def pen_settings(env_get, agents, references):
+    from engine.pen import validate_writer
+
+    def settings(name):
+        raw = env_get(name)
+        try:
+            value = {} if raw is None else json.loads(raw)
+        except ValueError:
+            value = None
+        if not isinstance(value, dict):
+            raise ValueError(name + " must be a JSON object")
+        return value
+
+    silo, reads, surfaces = (settings(name) for name in (SILO_ENV, READS_ENV, SURFACES_ENV))
+    for agent, collections in silo.items():
+        if agent != "*" and agent not in agents:
+            raise ValueError(SILO_ENV + ": unknown agent")
+        if not isinstance(collections, dict):
+            raise ValueError(SILO_ENV + ": expected collection settings")
+        spellings = set()
+        for collection, state in collections.items():
+            if collection != "*":
+                validate_writer(collection).encode("utf-8")
+                spelling = unicodedata.normalize("NFD", collection).casefold()
+                if spelling in spellings:
+                    raise ValueError(SILO_ENV + ": collection names collide")
+                spellings.add(spelling)
+            if state not in ("pool", "silo"):
+                raise ValueError(SILO_ENV + ": expected pool or silo")
+    for agent, state in reads.items():
+        if agent not in agents or state not in ("own", "pool"):
+            raise ValueError(READS_ENV + ": expected a configured agent and own or pool")
+    for ref, surface in surfaces.items():
+        if ref not in references or not isinstance(surface, str) or not surface.strip():
+            raise ValueError(SURFACES_ENV + ": expected a known key reference and a surface name")
+        surface.encode("utf-8")
+    by_secret = {}
+    for ref, secret in references.items():
+        surface = surfaces.get(ref)
+        if by_secret.setdefault(secret, surface) != surface:
+            raise ValueError(SURFACES_ENV + ": one key cannot have different surfaces")
+    return (frozenset(agents), silo, reads), by_secret
+
+
+def pooled(silo, owner, collection, default):
+    named = silo.get(owner, {})
+    everyone = silo.get("*", {})
+    return named.get(collection, everyone.get(collection, named.get("*", everyone.get("*", default)))) == "pool"
+
 
 
 def _plugin_version():
@@ -92,15 +146,18 @@ TOOLS = [
 
 _TEXT = {"type": "string"}
 _POSITIVE = {"type": "integer", "minimum": 1}
+_OF = {"type": "string", "description": "Notebook owner. Defaults to the acting agent."}
+_SURFACE = {"type": "string", "description": "Surface of the current version."}
 _BOOL = {"type": "boolean"}
 
+_PEN_READS = {"pen_read", "pen_history", "pen_list", "pen_collections"}
 _PEN_ARGUMENT_TYPES = {"string": str, "boolean": bool, "integer": int}
 PEN_TOOLS = [
     {"name": name, "description": description,
      "inputSchema": {"type": "object", "properties": properties,
                      "required": required, "additionalProperties": False}}
     for name, description, properties, required in [
-        ("pen_collections", "List your collections and counts of active entries.", {}, []),
+        ("pen_collections", "List collections and counts of active entries. Use of for another agent's pooled collections.", {"of": _OF}, []),
         ("pen_write", "Write an entry. On first write, set by_day to group by creation day.",
          {"collection": _TEXT, "body": _TEXT, "title": _TEXT, "pinned": _BOOL, "by_day": _BOOL},
          ["collection", "body"]),
@@ -108,10 +165,10 @@ PEN_TOOLS = [
          {"id": _TEXT, "based_on": _POSITIVE, "body": _TEXT, "title": _TEXT, "pinned": _BOOL},
          ["id", "based_on"]),
         ("pen_read", "Read the latest or a specific version of an entry.",
-         {"id": _TEXT, "version": _POSITIVE}, ["id"]),
+         {"id": _TEXT, "version": _POSITIVE, "of": _OF}, ["id"]),
         ("pen_list", "List active entries in a collection, newest first.",
-         {"collection": _TEXT, "pinned_only": _BOOL, "day": _TEXT, "limit": _POSITIVE}, ["collection"]),
-        ("pen_history", "Read all versions of an entry, oldest first.", {"id": _TEXT}, ["id"]),
+         {"collection": _TEXT, "pinned_only": _BOOL, "day": _TEXT, "limit": _POSITIVE, "of": _OF, "surface": _SURFACE}, ["collection"]),
+        ("pen_history", "Read all versions of an entry, oldest first.", {"id": _TEXT, "of": _OF}, ["id"]),
         ("pen_delete", "Move an entry and its history aside for recovery.", {"id": _TEXT}, ["id"]),
     ]
 ]
@@ -139,6 +196,8 @@ class Config:
     pen = None
     pen_tools = PEN_TOOLS
     key_refs = set()
+    surfaces = {}
+    policy = (frozenset(), {}, {})
     shared_tools = {}     # agent tuple -> the pen tools a key shared by those agents lists
 
 
@@ -250,7 +309,7 @@ def _error(rid, code, message):
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
-def pen_tool(name, args, agents):
+def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
     if agents is None:
         return "no writer is assigned to this key", True
     if len(agents) == 1:
@@ -275,11 +334,24 @@ def pen_tool(name, args, agents):
             "minimum" in prop and value < prop["minimum"]
         ):
             return f"invalid {argument}", True
+    args = dict(args)
+    owner = writer
+    if name in _PEN_READS:
+        owner = args.pop("of", writer)
+        if owner != writer:
+            configured, silo, reads = policy or Config.policy
+            if owner not in configured:
+                return "unknown agent", True
+            if reads.get(writer) == "own":
+                return "this agent can only read its own notebooks", True
+            args["visible"] = lambda collection, default: pooled(silo, owner, collection, default)
+    elif name in {"pen_write", "pen_edit"}:
+        args["surface"] = surface
     if not _one_write.acquire(blocking=False):
         return "another write is running; try again when it finishes", True
     try:
-        method = getattr(Config.pen, name[4:])
-        result = method(writer, **args)
+        method = getattr(Config.pen if store is None else store, name[4:])
+        result = method(owner, **args)
         if name == "pen_write":
             result = {"id": result}
         elif name == "pen_edit":
@@ -287,13 +359,18 @@ def pen_tool(name, args, agents):
         elif name == "pen_delete":
             result = {"ok": True}
         return json.dumps(result, ensure_ascii=False), False
-    except (ValueError, OSError) as e:
+    except OSError as e:
+        if store is not None and name not in _PEN_READS:
+            # Cloud writes share a transaction with the retry record. Let it roll back.
+            raise
+        return str(e), True
+    except ValueError as e:
         return str(e), True
     finally:
         _one_write.release()
 
 
-def handle(msg, writer=None):
+def handle(msg, writer=None, *, surface=None, policy=None, store=None):
     """One JSON-RPC message -> its response dict, or None for a notification.
 
     `writer` is what the key is bound to: None, one agent name, or a tuple of agent names."""
@@ -322,7 +399,8 @@ def handle(msg, writer=None):
         args = params["arguments"] if "arguments" in params else {}
         if not isinstance(args, dict):
             return _error(rid, -32602, "arguments must be an object")
-        text, is_error = pen_tool(name, args, agents) if name in {t["name"] for t in Config.pen_tools} else run_tool(name, args)
+        text, is_error = (pen_tool(name, args, agents, surface=surface, policy=policy, store=store)
+                          if name in _PEN_SCHEMAS else run_tool(name, args))
         return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
     return _error(rid, -32601, f"method not found: {method}")
 
@@ -364,10 +442,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         got = self.headers.get("Authorization") or ""
         authenticated = False
-        writer = None
+        writer = surface = None
         for key, bound_writer in Config.keys.items():
             if hmac.compare_digest(got.encode(), f"Bearer {key}".encode()):
                 authenticated, writer = True, bound_writer
+                surface = Config.surfaces.get(key)
         if not authenticated:
             return self._send(401, {"error": "unauthorized"})
         if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
@@ -384,9 +463,9 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body, list):
             if not body:
                 return self._send(400, _error(None, -32600, "empty batch"))
-            answers = [a for a in (handle(m, writer) for m in body) if a is not None]
+            answers = [a for a in (handle(m, writer, surface=surface) for m in body) if a is not None]
             return self._send(202) if not answers else self._send(200, answers)
-        answer = handle(body, writer)
+        answer = handle(body, writer, surface=surface)
         return self._send(202) if answer is None else self._send(200, answer)
 
 
@@ -404,12 +483,13 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
     Config.root, Config.key = real, key
     Config.keys = {key: None}
     sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
-    from engine.pen import LocalFilesPenStore, PenStore, validate_writer
+    from engine.pen import PEN_CONTRACT_VERSION, LocalFilesPenStore, PenStore, validate_writer
     writers = {} if writers is None else writers
     if not isinstance(writers, dict): raise SystemExit("writers must be an object mapping environment key references to writers")
     Config.key_refs = set(writers)
     Config.shared_tools = {}
     writer_names = {}
+    references = {}
     for ref, writer in writers.items():
         if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ref): raise SystemExit("invalid key reference")
         secret = os.environ.get(ref, "")
@@ -426,10 +506,17 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
             normalized = unicodedata.normalize("NFD", name).casefold()
             if normalized in writer_names and writer_names[normalized] != name: raise SystemExit("writer names collide on case-insensitive filesystems")
             writer_names[normalized] = name
+        references[ref] = secret
         grant = tuple(names)
         current = Config.keys.get(secret)
         if current is None: Config.keys[secret] = grant
         elif set(current) != set(grant): raise SystemExit("one key cannot map to different agents")
+    if "SCRIPTORIUM_MCP_KEY" not in references and key not in references.values():
+        references["SCRIPTORIUM_MCP_KEY"] = key
+    try:
+        Config.policy, Config.surfaces = pen_settings(os.environ.get, writer_names.values(), references)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     Config.shared_tools = {v: _shared_pen_tools(v) for v in Config.keys.values() if v is not None and len(v) > 1}
     if pen_ref:
         mod, sep, attr = pen_ref.partition(":")
@@ -444,6 +531,8 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
                 method = getattr(store, name, None)
                 if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, name):
                     raise ValueError(f"pen store lacks required method: {name}")
+            if getattr(store, "contract_version", None) != PEN_CONTRACT_VERSION:
+                raise ValueError(f"pen store must declare contract_version = {PEN_CONTRACT_VERSION}")
             Config.pen_tools = PEN_TOOLS
             Config.pen = store
         except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))

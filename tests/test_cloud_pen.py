@@ -1,6 +1,7 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The pen contract (docs/your-own-store.md) run against SqlPenStore, and against LocalFilesPenStore as the reference."""
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 import json
 import sqlite3
 import sys
@@ -53,6 +54,38 @@ class Contract:
         self.assertEqual(self.store.collections('alpha'), [{'collection': 'notes', 'count': 1, 'by_day': False}])
         self.assertEqual(self.store.list('alpha', 'missing'), [])
         self.assertEqual(self.store.collections('beta'), [])
+
+    def test_pool_default_upgrade_and_owner_access(self):
+        modern = self.store.write('alpha', 'new', 'shared')
+        old = self.store.write('alpha', 'legacy', 'private')
+        self.remove_pool_metadata('legacy')
+        self.store.write('alpha', 'legacy', 'still private')
+        self.store.edit('alpha', old, 1, body='also private')
+        pool = lambda collection, default: default == 'pool'
+        self.assertEqual(self.store.read('alpha', old)['body'], 'also private')
+        self.assertEqual(self.store.read('alpha', modern, visible=pool)['body'], 'shared')
+        self.assertEqual([c['collection'] for c in self.store.collections('alpha', visible=pool)], ['new'])
+        for id in (old, 'f' * 32, 'invalid'):
+            with self.assertRaisesRegex(ValueError, '^entry not found$'):
+                self.store.read('alpha', id, version=99, visible=pool)
+            with self.assertRaisesRegex(ValueError, '^entry not found$'):
+                self.store.history('alpha', id, visible=pool)
+        for name in ('legacy', 'missing', 'LEGACY'):
+            with self.assertRaisesRegex(ValueError, '^collection not found$'):
+                self.store.list('alpha', name, visible=pool)
+
+    def test_surface_filter_uses_current_version_before_limit(self):
+        keep = self.store.write('alpha', 'notes', 'old', surface='desktop')
+        self.clock.set(2026, 1, 2)
+        newest = self.store.write('alpha', 'notes', 'new', surface='desktop')
+        self.store.edit('alpha', newest, 1, body='web', surface='web')
+        self.store.edit('alpha', newest, 2, body='unlabelled')
+        self.assertEqual([v.get('surface') for v in self.store.history('alpha', newest)],
+                         ['desktop', 'web', None])
+        self.assertNotIn('surface', self.store.read('alpha', newest))
+        self.assertEqual([v['id'] for v in self.store.list('alpha', 'notes', surface='desktop', limit=1)], [keep])
+        self.assertEqual(self.store.list('alpha', 'notes', surface='web'), [])
+        self.assertEqual(self.store.list('alpha', 'notes', limit=1)[0]['id'], newest)
 
     def test_edit_appends_versions_and_refuses_a_stale_base(self):
         id = self.store.write('alpha', 'notes', 'one', title='A')
@@ -254,6 +287,10 @@ class Contract:
 
 
 class SqlStoreTests(Contract, unittest.TestCase):
+    def remove_pool_metadata(self, collection):
+        self.store.adapter.run("DELETE FROM pen_collections WHERE writer = ? AND collection = ?",
+                               ('alpha', collection))
+
     def make(self, clock):
         connection = sqlite3.connect(':memory:')
         self.addCleanup(connection.close)
@@ -336,7 +373,8 @@ class SqlStoreTests(Contract, unittest.TestCase):
         self.assertEqual(statements, [])
         store.collections('alpha')
         store.collections('alpha')
-        self.assertEqual(sum(s.startswith('CREATE TABLE') for s in statements), 1)
+        tables = [s.split()[5] for s in statements if s.startswith('CREATE TABLE')]
+        self.assertCountEqual(tables, ['pen_versions', 'pen_collections'])
 
     def test_list_loads_only_the_limited_rows_not_the_whole_collection(self):
         clock = Clock(2026, 1, 1, 9)
@@ -379,10 +417,90 @@ class SqlStoreTests(Contract, unittest.TestCase):
 
 class LocalStoreTests(Contract, unittest.TestCase):
     """The same contract on the local store: the expectations above are the local store's own behaviour."""
+    def remove_pool_metadata(self, collection):
+        (self.store.root / 'alpha' / collection / '.pool').unlink()
+
     def make(self, clock):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         return LocalFilesPenStore(tmp.name, 'Asia/Jakarta', clock)
+
+
+class PoolTransferTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def sql(self):
+        connection = sqlite3.connect(':memory:')
+        self.addCleanup(connection.close)
+        return SqlPenStore(Sqlite3Sql(connection))
+
+    def test_interrupted_transfer_both_ways_preserves_defaults_and_surfaces(self):
+        for to_sql in (True, False):
+            with self.subTest(to_sql=to_sql):
+                local = LocalFilesPenStore(self.root / str(to_sql))
+                sql = self.sql()
+                source, destination = (local, sql) if to_sql else (sql, local)
+                private = source.write('alpha', 'legacy', 'private', surface='one')
+                if to_sql:
+                    (local.root / 'alpha' / 'legacy' / '.pool').unlink()
+                else:
+                    sql.adapter.run("DELETE FROM pen_collections WHERE collection = 'legacy'")
+                source.edit('alpha', private, 1, body='two', surface='two')
+                source.delete('alpha', private)
+                shared = source.write('alpha', 'pooled', 'shared', surface='one')
+                snapshot = source.export_snapshot('alpha')
+                self.assertEqual(snapshot['collections'], {'legacy': 'silo', 'pooled': 'pool'})
+                if to_sql:
+                    target, method = sql.adapter, 'run'
+                else:
+                    target, method = local, '_install_entry'
+                real = getattr(target, method)
+
+                def interrupt(query_or_path, *args):
+                    if (str(query_or_path).startswith('INSERT INTO pen_versions') and shared in args[0][0]
+                            if to_sql else query_or_path.name == shared):
+                        raise OSError('interrupted')
+                    return real(query_or_path, *args)
+
+                with mock.patch.object(target, method, side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, 'interrupted'):
+                        destination.import_snapshot('alpha', snapshot)
+                partial = destination.export_snapshot('alpha')
+                self.assertEqual(partial['collections'], {} if to_sql else snapshot['collections'])
+                self.assertEqual(len(partial['entries']), 0 if to_sql else 1)
+                destination.import_snapshot('alpha', snapshot)
+                destination.import_snapshot('alpha', snapshot)
+                self.assertEqual(destination.export_snapshot('alpha'), snapshot)
+
+    def test_concurrent_first_writes_publish_one_pool_default(self):
+        for sql in (False, True):
+            with self.subTest(sql=sql):
+                local = self.root / 'local'
+                database = self.root / 'test.sqlite'
+
+                def write(body):
+                    if not sql:
+                        return LocalFilesPenStore(local).write('alpha', 'first', body)
+                    connection = sqlite3.connect(database)
+                    try:
+                        return SqlPenStore(Sqlite3Sql(connection)).write('alpha', 'first', body)
+                    finally:
+                        connection.close()
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    ids = list(pool.map(write, ('one', 'two')))
+                if sql:
+                    connection = sqlite3.connect(database)
+                    self.addCleanup(connection.close)
+                    store = SqlPenStore(Sqlite3Sql(connection))
+                else:
+                    store = LocalFilesPenStore(local)
+                seen = store.list('alpha', 'first', visible=lambda name, default: default == 'pool')
+                self.assertCountEqual([r['id'] for r in seen], ids)
+                self.assertEqual(store.export_snapshot('alpha')['collections'], {'first': 'pool'})
 
 
 class ParityTests(unittest.TestCase):
