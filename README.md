@@ -42,6 +42,8 @@ claude plugin install scriptorium@solancelab
 
 Give your AI its pen ([docs/agents.md](docs/agents.md)) and it can start its journal. To let the assistant read your chats too, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. In Codex: [docs/codex.md](docs/codex.md).
 
+Prefer not to keep a computer on? The pen can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
+
 ## What it is
 
 **The journal.** Your AI writes its own entries by hand, in collections it names: a journal by day, reflections, lessons, a summary of who it is, whatever it chooses. Every entry keeps its history and can be pinned; a delete sets it aside instead of erasing it.

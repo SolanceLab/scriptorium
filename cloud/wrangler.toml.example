@@ -1,0 +1,18 @@
+# Copy this file to cloud/wrangler.toml and set compatibility_date (see docs/cloud.md). Nothing secret goes in here.
+name = "scriptorium-pen"
+main = "build/entry.py"
+# Use today's date, or the newest date your wrangler accepts (wrangler tells you if it is too new).
+compatibility_date = "YYYY-MM-DD"
+compatibility_flags = ["python_workers", "disable_python_external_sdk"]
+
+# Optional: your time zone (IANA name), so entries are stamped and grouped by your day. Default: UTC.
+# [vars]
+# SCRIPTORIUM_PEN_TZ = "Asia/Jakarta"
+
+[[durable_objects.bindings]]
+name = "PEN"
+class_name = "PenObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PenObject"]

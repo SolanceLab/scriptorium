@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 node_modules/
+cloud/build/
+cloud/.dev.vars
+cloud/.wrangler/
