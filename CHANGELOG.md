@@ -1,10 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.7.0
 
 The four pen read tools can read another agent's pooled notebooks when you supply `of`. New notebooks start in the pool and existing notebooks start private. Set `SCRIPTORIUM_SILO='{"*":{"*":"pool"}}'` to open existing notebooks for everyone, or choose individual agents and notebooks in [Agents](docs/agents.md#notebook-sharing-and-surfaces). The same settings cover the local and cloud pens. Keys can label each version by surface, and transfers keep those labels and notebook defaults. Custom pen stores must declare contract version 2.
-
-## 1.7.0
 
 Notes tag speakers as `user` and `agent` by default. You can set one name for each role and add a platform to the agent tag, such as `agent · Discord`. Every assistant turn uses the same tag. The built-in prompt keeps time words such as “last night” as spoken.
 
