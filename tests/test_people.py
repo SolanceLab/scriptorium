@@ -65,7 +65,8 @@ class People(unittest.TestCase):
             rc = wp.main(["--export", export, "--memories", mem, "--out", out,
                           "--model-cmd", self._fake(tmp, json.dumps(CARD))])
             self.assertEqual(rc, 0)
-            card = json.load(open(os.path.join(out, "person-nate.json")))
+            with open(os.path.join(out, "person-nate.json"), encoding="utf-8") as f:
+                card = json.load(f)
             self.assertEqual(card["conversation_id"], "person:nate")
             item = card["memories"][0]
             self.assertEqual(item["source_line_ids"], ["D1:1", "D2:1"])
@@ -283,7 +284,8 @@ class People(unittest.TestCase):
             self.assertEqual(res["dropped"]["Coach Rachel"], {"memories": 1, "sessions": 1})
 
     def test_the_people_prompt_is_public(self):
-        text = open(wp.PROMPT_FILE, encoding="utf-8").read()
+        with open(wp.PROMPT_FILE, encoding="utf-8") as f:
+            text = f.read()
         for word in ("Solance", "House", "All rights " + "reserved"):
             self.assertNotIn(word, text)
 

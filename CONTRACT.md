@@ -19,6 +19,8 @@
 
 The notes file shape is the contract with any reader: a recall engine reads `conversation_id`, `memories[].summary`, `excerpt`, `source_line_ids` and `source_session_date`, and finds the source lines in the same export. The `memories` field holds notes; it keeps its old name so files written before stay readable.
 
+`memories[].added_line_ids` is an optional, writer-owned array of unique line IDs added to recover missing quote citations. The writer discards any value supplied by the model. The field is visible in raw notes JSON, and readers can ignore it because `source_line_ids` already includes those IDs. The writer's `prompt_sha256` fingerprints the rendered instructions. Configured names are omitted from writer metadata.
+
 ## Optional account ids (found in chats)
 
 - A message may carry `sender_id`: the author's account id on the chat platform. It decides before the sender's name; an id no card knows ties the message to no one (a shown name can be anyone's).

@@ -2,7 +2,8 @@
 
 You are reading ONE conversation session. Each line starts with its line id in square brackets, then who sent it
 (`user` or `assistant`), then the text: `[D1:3] user: Caroline: Yes, Thursdays at seven.` When the text itself
-begins with a name and a colon, that name is the speaker; otherwise call the speakers "the user" and "the assistant".
+begins with a name and a colon, use that speaker name. Otherwise call the user "{{USER_NAME}}" and the assistant
+"{{AGENT_NAME}}".
 The session's date is given above the lines. Nothing outside this session is known to you; do not add facts that the
 lines do not state.
 
@@ -11,7 +12,8 @@ Extract memory threads from this session.
 For each thread, provide:
 
 1. `topic`. Use a coarse canonical name from the list below.
-2. `source_line_ids`. The dialogue line ids the thread is drawn from. At least one. Every thread carries them.
+2. `source_line_ids`. Cite every dialogue line a claim rests on, including the reply that settles it. Include
+   supporting lines even when you only quote part of the exchange. At least one. Every thread carries them.
 3. `source_session_date`. The session date, as the session states the calendar day (`8 May, 2023`).
 4. `excerpt`. The passage from those lines, verbatim. Join non-contiguous lines with ` [...] `. Do not paraphrase the excerpt.
 5. `summary`. One to three sentences in the third person, naming the speakers. An interpretive distillation of the excerpt. The nuance lives here, not in the topic name.
@@ -102,7 +104,7 @@ from any dataset.)
 [
   {
     "topic": "Creative",
-    "source_line_ids": ["D1:1", "D1:3"],
+    "source_line_ids": ["D1:1", "D1:2", "D1:3"],
     "source_session_date": "14 March, 2022",
     "excerpt": "Tom! I finally signed up for the pottery class at the community centre. [...] Yes, Thursdays at seven. First session was last night and I made a very lopsided bowl.",
     "summary": "Priya told Tom she had signed up for the Thursday-evening pottery class at the community centre, something she had talked about for a long time. Her first session was the night before, on 13 March 2022, and she made a lopsided bowl.",

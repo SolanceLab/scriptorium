@@ -1,6 +1,7 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
 """The writer keeps only memories its lines prove. Run: python3 -m unittest discover -s engine/tests"""
 from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 from http.client import BadStatusLine, IncompleteRead
 import io
 import json
@@ -19,6 +20,7 @@ for _d in (os.path.join(HERE, "..", "writer"), os.path.join(HERE, "..", "engine"
     if os.path.isdir(_d):
         sys.path.insert(0, _d)
 import write_memories as w  # noqa: E402
+import write_people as people  # noqa: E402
 
 GOOD = {"topic": "Creative", "keynote": "D1:1 D1:3", "source_line_ids": ["D1:1", "D1:3"],
         "source_session_date": "14 March, 2022",
@@ -425,6 +427,146 @@ class ApiBilling(unittest.TestCase):
         self.http.assert_not_called()
 
 
+class QuoteRepair(unittest.TestCase):
+    FIRST = "We chose the blue bowls for dinner"
+    SECOND = "The green plates will arrive after lunch"
+    THIRD = "We ordered twelve glass cups for dessert"
+
+    def write(self, excerpt, bodies=None, ids=None, summary=None, added=None, max_chars=w.MAX_PIECE_CHARS,
+              retry_answer=None):
+        bodies = bodies or [self.FIRST, self.SECOND, self.THIRD]
+        conv = dict(CONV, chat_messages=[
+            {"uuid": f"L{i}", "text": body, "sender": "user"} for i, body in enumerate(bodies, 1)
+        ])
+        note = dict(GOOD, excerpt=excerpt, source_line_ids=ids or ["L1"], summary=summary or GOOD["summary"],
+                    added_line_ids=added or ["bogus"])
+        with patch.object(w, "call_model", side_effect=lambda _cmd, prompt, _timeout: json.dumps(
+            [retry_answer] if retry_answer and "previous answer had these date errors" in prompt else [note]
+        )):
+            return w.write_conversation(conv, "template", "fake", 60, max_chars=max_chars)
+
+    def test_repairs_in_transcript_order_and_adds_each_id_once(self):
+        body = "The green plates will arrive\n after lunch. " + self.THIRD
+        out = self.write(f"{self.SECOND} [...] {self.THIRD} [...] {self.FIRST}",
+                         [body, self.FIRST], ids=["L2"])
+        note, = out["memories"]
+        self.assertEqual(note["source_line_ids"], ["L1", "L2"])
+        self.assertEqual(note["added_line_ids"], ["L1"])
+        self.assertEqual(out["rejected"], [])
+
+    def test_only_the_writer_can_supply_added_ids(self):
+        note, = self.write(self.FIRST)["memories"]
+        self.assertNotIn("added_line_ids", note)
+        reject, = self.write("This invented fragment never appeared here")["rejected"]
+        self.assertNotIn("added_line_ids", reject["thread"])
+
+    def test_rejects_ambiguous_short_stitched_missing_and_out_of_order_fragments(self):
+        cases = [
+            (self.SECOND, [self.FIRST, self.SECOND, self.SECOND]),
+            ("green plates will arrive after", None),
+            ("plates will arrive after lunch We ordered twelve", None),
+            ("These words are absent from the chat", None),
+            (f"{self.SECOND} [...] {self.FIRST}", None),
+            ("The green plates will arrive after lunch", [self.FIRST, self.SECOND + "es"]),
+            ("green plates will arrive after lunch", [self.FIRST, "evergreen plates will arrive after lunch"]),
+            (self.SECOND, [self.FIRST, self.SECOND + " " + self.THIRD, self.SECOND]),
+            ("we don't think it's", [self.FIRST, "we don't think it's ready yet"]),    # 4 words, 6 word-pieces
+            ("2026-11-21 18:06:20", [self.FIRST, "logged at 2026-11-21 18:06:20 today"]),
+        ]
+        for excerpt, bodies in cases:
+            with self.subTest(excerpt=excerpt, bodies=bodies):
+                out = self.write(excerpt, bodies)
+                self.assertEqual(out["memories"], [])
+                self.assertIn("word for word", out["rejected"][0]["reason"])
+
+    def test_repeated_occurrences_in_one_message_count_as_one_match(self):
+        note, = self.write(self.SECOND, [self.FIRST, self.SECOND + ". " + self.SECOND])["memories"]
+        self.assertEqual(note["added_line_ids"], ["L2"])
+
+    def test_six_words_are_enough_and_multiple_repairs_keep_order(self):
+        note, = self.write(f"{self.FIRST} [...] green plates will arrive after lunch [...] {self.THIRD}")["memories"]
+        self.assertEqual(note["source_line_ids"], ["L1", "L2", "L3"])
+        self.assertEqual(note["added_line_ids"], ["L2", "L3"])
+
+    def test_other_model_call_cannot_repair_a_quote(self):
+        out = self.write(self.SECOND, max_chars=70)
+        self.assertGreater(len(out["pieces"]), 1)
+        self.assertEqual(out["memories"], [])
+        self.assertIn("word for word", out["rejected"][0]["reason"])
+
+    def test_repair_requires_unambiguous_line_ids(self):
+        note = dict(GOOD, excerpt=self.SECOND, source_line_ids=["L1"])
+        for duplicate in ("L1", "L2"):
+            with self.subTest(duplicate=duplicate):
+                lines = [
+                    ("L1", "user", self.FIRST, None),
+                    ("L2", "assistant", self.SECOND, None),
+                    (duplicate, "user", self.THIRD, None),
+                ]
+                notes, rejected, _, _ = w._write_piece(
+                    "Example", "2022-03-14", lines, "template",
+                    lambda *_: (json.dumps([note]), {}), retries=0,
+                )
+                self.assertEqual(notes, [])
+                self.assertIn("word for word", rejected[0]["reason"])
+
+    def test_repaired_line_neither_introduces_nor_excuses_a_date_error(self):
+        summary = "They ordered the dishes on 4 March 2022."
+        out = self.write(self.SECOND, [self.FIRST, self.SECOND + ". I ordered them last Friday."], summary=summary)
+        self.assertEqual(len(out["memories"]), 1)
+        self.assertEqual(len(out["calls"]), 1)
+        out = self.write(self.SECOND, [self.FIRST + ". I ordered them last Friday.",
+                                      self.SECOND + ". The shop opened on 4 March 2022."], summary=summary)
+        self.assertEqual(out["memories"], [])
+        self.assertIn("word for word", out["rejected"][0]["reason"])
+        self.assertEqual(len(out["calls"]), 1)
+
+    def test_existing_date_retry_can_return_a_repaired_note(self):
+        wrong = "They ordered the dishes on 4 March 2022."
+        right = "They ordered the dishes on 11 March 2022."
+        retry = dict(GOOD, excerpt=self.SECOND, source_line_ids=["L1"], summary=right)
+        out = self.write(self.FIRST, [self.FIRST + ". I ordered them last Friday.", self.SECOND],
+                         summary=wrong, retry_answer=retry)
+        note, = out["memories"]
+        self.assertEqual(note["summary"], right)
+        self.assertEqual(note["added_line_ids"], ["L2"])
+        self.assertEqual(out["calls"][1]["retry"], "date")
+
+    def test_repair_checks_the_excerpt_without_establishing_summary_support(self):
+        summary = "They won a national award for their dishes."
+        note, = self.write(self.SECOND, summary=summary)["memories"]
+        self.assertEqual(note["summary"], summary)
+        self.assertEqual(note["added_line_ids"], ["L2"])
+
+    def test_people_reader_loads_old_and_repaired_notes_and_cards_do_not_repair(self):
+        repaired = self.write(self.SECOND)
+        old = dict(conversation_id="old", memories=[
+            dict(repaired["memories"][0], excerpt=self.FIRST, source_line_ids=["L1"])
+        ])
+        del old["memories"][0]["added_line_ids"]
+        with tempfile.TemporaryDirectory() as tmp:
+            _dump(repaired, os.path.join(tmp, "repaired.json"))
+            _dump(old, os.path.join(tmp, "old.json"))
+            records = {record["cid"]: record for record in people.load_memories(tmp)}
+        self.assertEqual(set(records), {"conv-1", "old"})
+        by_id = {"L1": self.FIRST, "L2": self.SECOND}
+        when = dict.fromkeys(by_id, "2022-03-14")
+        for cid, expected in (("conv-1", ["L1", "L2"]), ("old", ["L1"])):
+            row = records[cid]
+            self.assertEqual(row["lines"], expected)
+            self.assertNotIn("added_line_ids", row)
+            item = {"person": "Priya", "aspect": "pottery", "memories": [row["mid"]],
+                    "summary": "Priya signed up for pottery on 14 March 2022."}
+            card, why = people.check_item(item, by_id, when, {row["mid"]: row})
+            self.assertIsNone(why)
+            self.assertEqual(card["source_line_ids"], expected)
+        row = dict(records["old"], excerpt=self.SECOND)
+        item["memories"] = [row["mid"]]
+        card, why = people.check_item(item, by_id, when, {row["mid"]: row})
+        self.assertIsNone(card)
+        self.assertIn("word for word", why)
+
+
 class RunRecord(unittest.TestCase):
     """Benchmark review 17 Oct: pinned model + full provenance, atomic files, honest re-runs, public prompt, clean env."""
 
@@ -465,13 +607,68 @@ class RunRecord(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cmd, _ = self._counting_fake(tmp, json.dumps([GOOD]))
             out = os.path.join(tmp, "out")
-            w.main(["--export", self._export(tmp), "--out", out, "--model-cmd", cmd, "--prompt", "public"])
+            with patch.dict(os.environ, {"SCRIPTORIUM_USER_NAME": "", "SCRIPTORIUM_AGENT_NAME": ""}):
+                w.main(["--export", self._export(tmp), "--out", out, "--model-cmd", cmd, "--prompt", "public"])
             rec = _load(os.path.join(out, "conv-1.json"))["writer"]
             self.assertEqual(rec["model_cmd"], cmd)
             self.assertEqual(rec["prompt_file"], "prompt-public.md")
-            self.assertEqual(rec["prompt_sha256"], w.sha256_file(w.PROMPTS["public"]))
+            with open(w.PROMPTS["public"], encoding="utf-8") as f:
+                instructions = w.render_instructions(f.read(), "public", None, None)
+            self.assertEqual(rec["prompt_sha256"], hashlib.sha256(instructions.encode("utf-8")).hexdigest())
             self.assertIn("writer_commit", rec)
             self.assertIn("claude_version", rec)
+
+    def test_names_reach_the_model_from_flags_or_env_and_change_the_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            args = ["--export", self._export(tmp), "--out", out, "--model-cmd", "fake", "--prompt", "public"]
+            digests = []
+            for env, flags, labels in (
+                ({}, [], ("the user", "the assistant")),
+                ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey"}, [], ("Morgan", "Casey")),
+                ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey"},
+                 ["--user-name", "Riley", "--agent-name", "Taylor"], ("Riley", "Taylor")),
+                ({"SCRIPTORIUM_AGENT_NAME": "Casey"}, [], ("the user", "Casey")),
+            ):
+                with (patch.dict(os.environ, env, clear=True),
+                      patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model):
+                    self.assertEqual(w.main(args + flags), 0)
+                prompt = model.call_args.args[1]
+                instructions = prompt.split("\n\n---\n\nSession:", 1)[0]
+                self.assertIn(f'call the user "{labels[0]}" and the assistant\n"{labels[1]}"', instructions)
+                self.assertIn("use that speaker name", instructions)
+                self.assertIn("[D1:1] user: Priya:", prompt)
+                writer = _load(os.path.join(out, "conv-1.json"))["writer"]
+                self.assertEqual(writer["prompt_sha256"], hashlib.sha256(instructions.encode("utf-8")).hexdigest())
+                for name in ("Morgan", "Casey", "Riley", "Taylor"):
+                    self.assertNotIn(name, json.dumps(writer))
+                digests.append(writer["prompt_sha256"])
+            self.assertEqual(len(set(digests)), len(digests))
+
+    def test_custom_prompt_path_is_used_verbatim_and_house_can_remain_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            prompt_path = os.path.join(tmp, "prompt.md")
+            template = "Instructions with literal {{USER_NAME}} and {{AGENT_NAME}}."
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(template)
+            args = ["--export", self._export(tmp), "--out", out, "--model-cmd", "fake",
+                    "--user-name", "Morgan", "--agent-name", "Casey"]
+            with (patch.dict(w.PROMPTS, {"house": prompt_path}),
+                  patch.object(w, "DEFAULT_PROMPT", "house"),
+                  patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model):
+                self.assertEqual(w.main(args + ["--prompt", prompt_path]), 0)
+                self.assertTrue(model.call_args.args[1].startswith(template + "\n\n---"))
+                self.assertEqual(w.main(args), 0)
+                self.assertIn("Instructions with literal Morgan and Casey.", model.call_args.args[1])
+                self.assertIn('use "Morgan" for the user and "Casey" for the assistant', model.call_args.args[1])
+
+    def test_public_prompt_cites_support_and_names_only_by_placeholder(self):
+        with open(w.PROMPTS["public"], encoding="utf-8") as f:
+            template = f.read()
+        self.assertIn("Cite every dialogue line a claim rests on, including the reply that settles it.", template)
+        example = json.loads(template.split("```json\n", 1)[1].split("```", 1)[0])
+        self.assertEqual(example[0]["source_line_ids"], ["D1:1", "D1:2", "D1:3"])
 
     def test_skip_existing_redoes_errored_and_empty_files_but_keeps_finished_ones(self):
         two = [CONV, dict(CONV, uuid="conv-2"), dict(CONV, uuid="conv-3")]
@@ -484,7 +681,8 @@ class RunRecord(unittest.TestCase):
             cmd, log = self._counting_fake(tmp, json.dumps([GOOD]))
             rc = w.main(["--export", self._export(tmp, two), "--out", out, "--model-cmd", cmd, "--skip-existing"])
             self.assertEqual(rc, 0)
-            self.assertEqual(open(log).read(), "xx")                  # conv-2 and conv-3 redone, conv-1 left alone
+            with open(log, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "xx")  # conv-2 and conv-3 redone, conv-1 left alone
             self.assertEqual(len(_load(os.path.join(out, "conv-2.json"))["memories"]), 1)
 
     def test_an_empty_run_is_reported_and_fails(self):
@@ -516,10 +714,14 @@ class RunRecord(unittest.TestCase):
             self.assertTrue(set(seen) <= set(w.ENV_KEEP) | {"__CF_USER_TEXT_ENCODING", "PWD", "SHLVL", "_"})
 
     def test_the_public_prompt_has_no_house_notice_or_vocabulary(self):
-        text = open(w.PROMPTS["public"], encoding="utf-8").read()
+        with open(w.PROMPTS["public"], encoding="utf-8") as f:
+            text = f.read()
         for word in ("Solance", "House", "keynote", "Keynote", "All rights " + "reserved"):
             self.assertNotIn(word, text)
-        house = open(w.PROMPTS["house"], encoding="utf-8").read() if os.path.exists(w.PROMPTS["house"]) else None
+        house = None
+        if os.path.exists(w.PROMPTS["house"]):
+            with open(w.PROMPTS["house"], encoding="utf-8") as f:
+                house = f.read()
         for rule in ("Excerpts come from the named source lines", "READ it off the calendar",
                      "Salience tracks structural role", "Output only a valid JSON array"):
             self.assertIn(rule, text)
@@ -708,7 +910,8 @@ class Dates(unittest.TestCase):
 
     def test_both_prompts_carry_the_calendar_rule(self):
         for name in [n for n in ("house", "public") if os.path.exists(w.PROMPTS[n])]:
-            text = open(w.PROMPTS[name], encoding="utf-8").read()
+            with open(w.PROMPTS[name], encoding="utf-8") as f:
+                text = f.read()
             self.assertIn("READ it off the calendar", text)
             self.assertIn("Never hedge a date", text)
 

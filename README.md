@@ -66,6 +66,8 @@ Prefer not to keep a computer on? The pen can also run in your own free Cloudfla
 
 When running `engine/write_notes.py` by hand, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
 
+Use `--user-name` and `--agent-name` to give the built-in notes prompt speaker names. The MCP server reads these from `SCRIPTORIUM_USER_NAME` and `SCRIPTORIUM_AGENT_NAME` in its environment. Configured names go to the model you choose.
+
 Everything runs on your own computer. Your conversations go only to the model you choose.
 
 ## Settings
@@ -117,7 +119,7 @@ Every limit, with its number: [docs/limits.md](docs/limits.md).
 
 ## How it works
 
-The model proposes; the code checks. A note is kept only if every word of its quote appears in the line it cites and its date holds up. Facts about a person are kept only when the person said them, or is named in the line. Anything that fails is reported or set aside, never kept quietly. More: [docs/how-it-works.md](docs/how-it-works.md).
+Every fragment of a kept note's quote appears in a cited message. When a missing fragment has at least six words and matches exactly one message in the same model call, the writer can recover its citation and record it in `added_line_ids`. This verifies where the words appear. Dates are checked against the model's original citations. Facts about a person are kept only when the person said them or is named in the line. [How it works](docs/how-it-works.md)
 
 ## Credit and use
 

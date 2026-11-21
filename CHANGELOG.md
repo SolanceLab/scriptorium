@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+The public notes prompt asks for named speakers and citations for every supporting line, including the reply that settles a claim. Configure speaker names through CLI flags or the server environment. The writer can recover a missing citation for a fragment that matches one message in the same model call and records the added IDs in the notes JSON. These changes affect newly written files only.
+
 ## 1.6.0
 
 Two new options, neither of them a default.

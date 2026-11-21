@@ -11,7 +11,7 @@ word for word in those lines. A note that fails is reported, never kept.
 The model is whatever command `--model-cmd` names: it receives the full prompt on stdin and prints its answer (plain,
 or Claude Code's `--output-format json` envelope, whose model, usage and cost are then recorded). Every output file
 carries a `writer` block: the exact command, `claude --version`, the resolved model, usage and cost per call, the
-writer's commit, and the prompt file with its sha256 — so a run can be repeated and audited.
+writer's commit, and the prompt file with the SHA-256 of the rendered instructions.
 
 This writer is one notes METHOD (notes carry a verbatim excerpt). Other methods (e.g. generic summaries) do not
 pass through it: they write the same file format directly, and the search adapter treats every file alike.
@@ -20,7 +20,9 @@ Each file keeps its notes under the key "memories", the old name, so files writt
 write_memories.py is the old name of this file and still works.
 """
 import argparse
+from collections import Counter
 from functools import partial
+import hashlib
 from http.client import HTTPException
 import json
 import os
@@ -266,6 +268,13 @@ def check_dates(summary, cited_text, date, relative=True):
 
 def check_thread(t, by_id, date, relative=True):
     """Return (cleaned thread, None) or (None, reason). Never invents: only trims and normalises."""
+    return _validate_thread(t, by_id, date, relative)
+
+
+_QUOTE_ERROR = "excerpt not word for word in one of its lines: "
+
+
+def _validate_thread(t, by_id, date, relative, added_ids=()):
     if not isinstance(t, dict):
         return None, "not an object"
     missing = [k for k in REQUIRED if not t.get(k)]
@@ -277,14 +286,14 @@ def check_thread(t, by_id, date, relative=True):
     unknown = [i for i in ids if i not in by_id]
     if unknown:
         return None, "cites lines not in this session: " + ", ".join(unknown)
-    cited = [_norm(by_id[i]) for i in ids]
+    cited = [_norm(by_id[i]) for i in (*ids, *added_ids)]
     parts = [_norm(p) for p in str(t["excerpt"]).split(GAP)]
     if not any(len(p.split()) >= 2 for p in parts):
         return None, "excerpt has no words of its own"
     for part in parts:
         # each piece must sit inside ONE cited line: pieces may not be stitched across lines into a new sentence
         if part and not any(part in line for line in cited):
-            return None, f"excerpt not word for word in one of its lines: {part[:80]!r}"
+            return None, f"{_QUOTE_ERROR}{part[:80]!r}"
     clean = dict(t)
     if clean["topic"] not in TOPICS:
         clean["topic"] = "Personal"
@@ -445,10 +454,62 @@ def unwrap(stdout):
     return str(env.get("result") or ""), {k: v for k, v in rec.items() if v is not None}
 
 
-def _check_all(threads, by_id, date):
+def _repair_quote(thread, messages, id_counts):
+    """Find unique missing citations, with all fragments in transcript order."""
+    cited = set(thread["source_line_ids"])
+    if any(id_counts[lid] != 1 for lid in cited):
+        return []
+    added = {}
+    position, end = 0, 0
+    for part in filter(None, (_norm(p) for p in str(thread["excerpt"]).split(GAP))):
+        candidates = [i for i, (lid, line) in enumerate(messages) if lid in cited and part in line]
+        pattern = re.escape(part)
+        if not candidates:
+            if len(part.split()) < 6:    # words as spoken: "don't" and a timestamp count once
+                return []
+            if re.match(r"\w", part):
+                pattern = r"(?<!\w)" + pattern
+            if re.search(r"\w$", part):
+                pattern += r"(?!\w)"
+            candidates = [i for i, (_, line) in enumerate(messages) if re.search(pattern, line)]
+            if len(candidates) != 1:
+                return []
+            i = candidates[0]
+            lid = messages[i][0]
+            if id_counts[lid] != 1:
+                return []
+            added[lid] = None
+
+        # Use the earliest available occurrence so later fragments have the most room to match.
+        for i in candidates:
+            if i >= position:
+                match = re.compile(pattern).search(messages[i][1], end if i == position else 0)
+                if match:
+                    position, end = i, match.end()
+                    break
+        else:
+            return []
+    return list(added)
+
+
+def _check_all(threads, lines, date):
+    by_id = {lid: text for lid, _, text, _ in lines}
+    messages = [(lid, _norm(text)) for lid, _, text, _ in lines]
+    id_counts = Counter(lid for lid, _ in messages)
+    order = {lid: i for i, (lid, _) in enumerate(messages)}
     kept, rejected = [], []
     for t in threads:
+        if isinstance(t, dict) and "added_line_ids" in t:
+            t = {key: value for key, value in t.items() if key != "added_line_ids"}
         clean, why = check_thread(t, by_id, date)
+        if why and why.startswith(_QUOTE_ERROR):
+            added = _repair_quote(t, messages, id_counts)
+            if added:
+                clean, _ = _validate_thread(t, by_id, date, relative=True, added_ids=added)
+                if clean:
+                    clean["added_line_ids"] = added
+                    clean["source_line_ids"] = sorted(t["source_line_ids"] + added, key=order.__getitem__)
+                # A failed repair keeps the original rejection and its retry behavior.
         (kept.append(clean) if clean else rejected.append({"reason": why, "thread": t}))
     return kept, rejected
 
@@ -520,7 +581,6 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
 
 def _write_piece(title, date, lines, template, fetch, retries):
     """One model call (plus retries) for one piece: (kept, rejected, calls, error or None)."""
-    by_id = {lid: text for lid, _, text, _ in lines}
     prompt = build_prompt(template, title, date, lines)
     last_err = None
     calls = []
@@ -537,7 +597,7 @@ def _write_piece(title, date, lines, template, fetch, retries):
             last_err = str(e)
     else:
         return [], [], calls, last_err
-    kept, rejected = _check_all(threads, by_id, date)
+    kept, rejected = _check_all(threads, lines, date)
     # One corrective retry when a memory was rejected for a DATE the calendar proves wrong: the model is told which
     # date it got wrong and asked again. The answer that keeps more proven memories wins (ties: the retry).
     date_errors = [r["reason"] for r in rejected if _is_date_reason(r["reason"])]
@@ -547,7 +607,7 @@ def _write_piece(title, date, lines, template, fetch, retries):
         try:
             text, rec = fetch(prompt + fix)
             calls.append(dict(rec, retry="date"))
-            k2, r2 = _check_all(parse_answer(text), by_id, date)
+            k2, r2 = _check_all(parse_answer(text), lines, date)
             if len(k2) >= len(kept):
                 kept, rejected = k2, r2
         except ApiCallError as e:
@@ -558,12 +618,11 @@ def _write_piece(title, date, lines, template, fetch, retries):
 
 
 def sha256_file(path):
-    import hashlib
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def run_record(model_cmd, prompt_path):
+def run_record(model_cmd, prompt_path, rendered=None):
     """What made this run: recorded once, copied into every output file."""
     def out(cmd, cwd=None):
         try:
@@ -577,7 +636,9 @@ def run_record(model_cmd, prompt_path):
     return {"model_cmd": model_cmd,
             "claude_version": out(["claude", "--version"]) if os.path.basename(prog) == "claude" else None,
             "writer_commit": commit, "writer_dirty": bool(dirty),
-            "prompt_file": os.path.basename(prompt_path), "prompt_sha256": sha256_file(prompt_path),
+            "prompt_file": os.path.basename(prompt_path),
+            "prompt_sha256": (sha256_file(prompt_path) if rendered is None else
+                              hashlib.sha256(rendered.encode("utf-8")).hexdigest()),
             "env_passed": sorted(minimal_env().keys())}
 
 
@@ -605,6 +666,17 @@ def write_atomic(path, obj):
         raise
 
 
+def render_instructions(template, prompt, user_name, agent_name):
+    if prompt not in PROMPTS:
+        return template
+    labels = {"{{USER_NAME}}": user_name or "the user", "{{AGENT_NAME}}": agent_name or "the assistant"}
+    if prompt == "house" and (user_name or agent_name):
+        # The private template can predate the public placeholders.
+        template += ('\n\nWhen a message begins with an explicit speaker name, use that name. '
+                     'Otherwise use "{{USER_NAME}}" for the user and "{{AGENT_NAME}}" for the assistant.')
+    return re.sub(r"\{\{(?:USER|AGENT)_NAME\}\}", lambda match: labels[match[0]], template)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--export", required=True, help="a Claude-format conversations.json")
@@ -617,6 +689,10 @@ def main(argv=None):
     ap.add_argument("--model-cmd", default=os.environ.get("MEMORY_WRITER_CMD"),
                     help="a whole command of your own instead of the default (overrides --model)")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="public | house (House copy only) | a path to a prompt file")
+    ap.add_argument("--user-name", default=os.environ.get("SCRIPTORIUM_USER_NAME"),
+                    help="user name to send to the model in built-in prompts")
+    ap.add_argument("--agent-name", default=os.environ.get("SCRIPTORIUM_AGENT_NAME"),
+                    help="assistant name to send to the model in built-in prompts")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--timezone", default=os.environ.get("MEMORY_WRITER_TZ") or None,
                     help="IANA time zone for calendar days, e.g. Asia/Jakarta (default: the export's own, UTC)")
@@ -647,13 +723,13 @@ def main(argv=None):
     api_call = partial(call_api, model, key) if a.api else None
     prompt_path = PROMPTS.get(a.prompt, a.prompt)
     with open(prompt_path, encoding="utf-8") as f:
-        template = f.read()
+        template = render_instructions(f.read(), a.prompt, a.user_name, a.agent_name)
     with open(a.export, encoding="utf-8") as f:
         convs = json.load(f)
     if a.limit and not a.skip_existing:
         convs = convs[:a.limit]
     os.makedirs(a.out, exist_ok=True)
-    record = dict(run_record(model_cmd, prompt_path), timezone=a.timezone or "as exported")
+    record = dict(run_record(model_cmd, prompt_path, template), timezone=a.timezone or "as exported")
     if a.api:
         record.update(transport="anthropic_api", model=model)
     total = {"expected": len(convs), "skipped_finished": 0, "written": 0, "errored": 0, "empty": 0,
