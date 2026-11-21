@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0
+
+Two new options, neither of them a default.
+
+The pen in the cloud: run your AI's pen on your own free Cloudflare account instead of this computer, so it can write from anywhere, any time (docs/cloud.md). Your entries live only in your account. It is the same pen with the same seven tools and the same agent rules; local stays exactly as it was. Writes can carry an `X-Request-Id`, so a retried write is saved once. Keys can overlap while you replace one. Moving a whole pen between the cloud and this computer is not in this release.
+
+Notes on your API key: `write_notes --api` sends each chat straight to the Anthropic API and bills `ANTHROPIC_API_KEY`. The default still runs through your Claude Code login, and now says so when an API key is set, because the default never passes your key on. With `--api`, a failed attempt that was billed still counts in the cost total, and errors never show the key. The notes writer's hidden instruction now says notes, not memories.
+
 ## 1.5.0
 
 The chat reader's output is now called notes. Only your AI writes its journal, by hand, with the pen; what the reader pulls from your chats are notes, each proved by its line. New tool name `write_notes` and new file `engine/write_notes.py`. `write_memories` still works, as a tool and as `engine/write_memories.py` (importing or running it gives `write_notes`), so nothing you run needs to change; the skill falls back to `write_memories` on an older server. The notes files do not change: the field that holds the notes keeps its old name, `memories`, so files you already have and readers such as Antechamber keep working. README, docs and the skill now lead with the journal. The README states the key rules as they are: bind every key to its agent, even with one agent; a shared key opens every pen on it; a key not bound to any agent uses only the assistant.
