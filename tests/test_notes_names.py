@@ -512,7 +512,7 @@ class WordsSayNotes(unittest.TestCase):
 
     def test_opening_explains_who_writes_and_who_finds(self):
         readme = text_of("README.md")
-        opening = readme.split("\n\n", 2)[1]
+        opening = readme.split("\n\n", 3)[2]    # title, maker line, then the opening sentence
         self.assertEqual(opening, f"Scriptorium writes entries and chat notes, and [Antechamber]({ANTECHAMBER_URL}) "
                                   "finds notes and chat lines without writing anything.")
         self.assertIn(f"[Antechamber]({ANTECHAMBER_URL})", text_of("docs/how-it-works.md"))
