@@ -1,8 +1,8 @@
 # Scriptorium
 
-Scriptorium writes entries and chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
-
 Made by House of Solance · free for noncommercial use · credit required
+
+Scriptorium writes entries and chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
 
 Your AI chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
 
