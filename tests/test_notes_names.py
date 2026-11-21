@@ -94,23 +94,25 @@ class NotesOverHttp(unittest.TestCase):
     def call(self, name, out):
         return self.post("tools/call", {"name": name, "arguments": {"export": "conversations.json", "out": out}})
 
-    def test_speaker_names_come_from_server_environment_only(self):
+    def test_speaker_tags_come_from_server_environment_only(self):
         prompt_path = os.path.join(self.root, "captured.txt")
         model_path = os.path.join(self.root, "fake_model.py")
         with open(model_path, "w", encoding="utf-8") as f:
             f.write(f"import sys\nwith open({prompt_path!r}, 'w', encoding='utf-8') as out:\n"
                     f"    out.write(sys.stdin.read())\nprint({json.dumps(ANSWER)!r})\n")
-        with patch.dict(os.environ, {"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey"}):
+        with patch.dict(os.environ, {"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey",
+                                     "SCRIPTORIUM_PLATFORM": "Discord"}):
             for name, out in (("write_notes", "new"), ("write_memories", "legacy")):
                 with self.subTest(tool=name):
                     res = self.post("tools/call", {"name": name, "arguments": {
                         "export": "conversations.json", "out": out,
-                        "user_name": "RequestUser", "agent_name": "RequestAgent",
+                        "user_name": "RequestUser", "agent_name": "RequestAgent", "platform": "RequestPlatform",
                     }})
                     self.assertFalse(res["isError"], res)
                     with open(prompt_path, encoding="utf-8") as f:
                         prompt = f.read()
-                    self.assertIn('call the user "Morgan" and the assistant\n"Casey"', prompt)
+                    self.assertIn('Tag user as "Morgan" and agent as "Casey · Discord".', " ".join(prompt.split()))
+                    self.assertNotIn("RequestPlatform", prompt)
                     self.assertNotIn("RequestUser", prompt)
                     self.assertNotIn("RequestAgent", prompt)
 

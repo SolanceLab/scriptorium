@@ -607,7 +607,7 @@ class RunRecord(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cmd, _ = self._counting_fake(tmp, json.dumps([GOOD]))
             out = os.path.join(tmp, "out")
-            with patch.dict(os.environ, {"SCRIPTORIUM_USER_NAME": "", "SCRIPTORIUM_AGENT_NAME": ""}):
+            with patch.dict(os.environ, {"SCRIPTORIUM_USER_NAME": "", "SCRIPTORIUM_AGENT_NAME": "", "SCRIPTORIUM_PLATFORM": ""}):
                 w.main(["--export", self._export(tmp), "--out", out, "--model-cmd", cmd, "--prompt", "public"])
             rec = _load(os.path.join(out, "conv-1.json"))["writer"]
             self.assertEqual(rec["model_cmd"], cmd)
@@ -618,29 +618,39 @@ class RunRecord(unittest.TestCase):
             self.assertIn("writer_commit", rec)
             self.assertIn("claude_version", rec)
 
-    def test_names_reach_the_model_from_flags_or_env_and_change_the_fingerprint(self):
+    def test_speaker_tags_reach_the_model_from_flags_or_env_and_change_the_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out")
             args = ["--export", self._export(tmp), "--out", out, "--model-cmd", "fake", "--prompt", "public"]
             digests = []
             for env, flags, labels in (
-                ({}, [], ("the user", "the assistant")),
-                ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey"}, [], ("Morgan", "Casey")),
+                ({}, [], ("user", "agent")),
+                ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey",
+                  "SCRIPTORIUM_PLATFORM": "Discord"}, [], ("Morgan", "Casey · Discord")),
+                ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey",
+                  "SCRIPTORIUM_PLATFORM": "Discord"},
+                 ["--user-name", "Riley", "--agent-name", "Taylor", "--platform", "Slack"],
+                 ("Riley", "Taylor · Slack")),
                 ({"SCRIPTORIUM_USER_NAME": "Morgan", "SCRIPTORIUM_AGENT_NAME": "Casey"},
-                 ["--user-name", "Riley", "--agent-name", "Taylor"], ("Riley", "Taylor")),
-                ({"SCRIPTORIUM_AGENT_NAME": "Casey"}, [], ("the user", "Casey")),
+                 ["--user-name", "", "--agent-name", " ", "--platform", "Discord"], ("user", "agent · Discord")),
+                ({"SCRIPTORIUM_AGENT_NAME": "Casey", "SCRIPTORIUM_PLATFORM": "Discord"},
+                 ["--platform", ""], ("user", "Casey")),
             ):
-                with (patch.dict(os.environ, env, clear=True),
-                      patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model):
-                    self.assertEqual(w.main(args + flags), 0)
+                with patch.dict(os.environ, env, clear=True):
+                    with patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model:
+                        self.assertEqual(w.main(args + flags), 0)
                 prompt = model.call_args.args[1]
                 instructions = prompt.split("\n\n---\n\nSession:", 1)[0]
-                self.assertIn(f'call the user "{labels[0]}" and the assistant\n"{labels[1]}"', instructions)
-                self.assertIn("use that speaker name", instructions)
+                self.assertIn(f'Tag user as "{labels[0]}" and agent as "{labels[1]}".',
+                              " ".join(instructions.split()))
+                self.assertIn("Use the turn role for attribution, ignoring quotation marks and name prefixes",
+                              instructions)
                 self.assertIn("[D1:1] user: Priya:", prompt)
+                self.assertIn("[D1:2] agent: Tom:", prompt)
+                self.assertNotIn("Relative-date key", prompt)
                 writer = _load(os.path.join(out, "conv-1.json"))["writer"]
                 self.assertEqual(writer["prompt_sha256"], hashlib.sha256(instructions.encode("utf-8")).hexdigest())
-                for name in ("Morgan", "Casey", "Riley", "Taylor"):
+                for name in ("Morgan", "Casey", "Riley", "Taylor", "Discord", "Slack"):
                     self.assertNotIn(name, json.dumps(writer))
                 digests.append(writer["prompt_sha256"])
             self.assertEqual(len(set(digests)), len(digests))
@@ -649,25 +659,36 @@ class RunRecord(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out")
             prompt_path = os.path.join(tmp, "prompt.md")
-            template = "Instructions with literal {{USER_NAME}} and {{AGENT_NAME}}."
+            template = ("Instructions with literal {{USER_NAME}} and {{AGENT_NAME}}.\n"
+                        "Use the name at the start of the message. READ it off the calendar.")
             with open(prompt_path, "w", encoding="utf-8") as f:
                 f.write(template)
             args = ["--export", self._export(tmp), "--out", out, "--model-cmd", "fake",
-                    "--user-name", "Morgan", "--agent-name", "Casey"]
-            with (patch.dict(w.PROMPTS, {"house": prompt_path}),
-                  patch.object(w, "DEFAULT_PROMPT", "house"),
-                  patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model):
-                self.assertEqual(w.main(args + ["--prompt", prompt_path]), 0)
-                self.assertTrue(model.call_args.args[1].startswith(template + "\n\n---"))
-                self.assertEqual(w.main(args), 0)
-                self.assertIn("Instructions with literal Morgan and Casey.", model.call_args.args[1])
-                self.assertIn('use "Morgan" for the user and "Casey" for the assistant', model.call_args.args[1])
+                    "--user-name", "Morgan", "--agent-name", "Casey", "--platform", "Discord"]
+            with patch.dict(w.PROMPTS, {"house": prompt_path}):
+                with patch.object(w, "DEFAULT_PROMPT", "house"):
+                    with patch.object(w, "call_model", return_value=json.dumps([GOOD])) as model:
+                        self.assertEqual(w.main(args + ["--prompt", prompt_path]), 0)
+                        custom_prompt = model.call_args.args[1]
+                        self.assertTrue(custom_prompt.startswith(template + "\n\n---"))
+                        self.assertIn("[D1:2] assistant: Tom:", custom_prompt)
+                        self.assertIn("Relative-date key", custom_prompt)
+                        self.assertEqual(w.main(args), 0)
+                        house_prompt = model.call_args.args[1]
+                        self.assertIn("These rules take precedence over any earlier speaker or relative-time instructions.",
+                                      house_prompt)
+                        self.assertIn('Tag user as "Morgan" and agent as "Casey · Discord".', house_prompt)
+                        self.assertIn(w.TIME_WORDS_RULE, house_prompt)
+                        self.assertIn("[D1:2] agent: Tom:", house_prompt)
 
     def test_public_prompt_cites_support_and_names_only_by_placeholder(self):
         with open(w.PROMPTS["public"], encoding="utf-8") as f:
             template = f.read()
         self.assertIn("Cite every dialogue line a claim rests on, including the reply that settles it.", template)
-        example = json.loads(template.split("```json\n", 1)[1].split("```", 1)[0])
+        agent_name = 'Casey "CJ" ' + chr(92) + ' team'
+        rendered = w.render_instructions(template, "public", None, agent_name)
+        example = json.loads(rendered.split("```json\n", 1)[1].split("```", 1)[0])
+        self.assertIn(agent_name, example[0]["summary"])
         self.assertEqual(example[0]["source_line_ids"], ["D1:1", "D1:2", "D1:3"])
 
     def test_skip_existing_redoes_errored_and_empty_files_but_keeps_finished_ones(self):
@@ -722,7 +743,7 @@ class RunRecord(unittest.TestCase):
         if os.path.exists(w.PROMPTS["house"]):
             with open(w.PROMPTS["house"], encoding="utf-8") as f:
                 house = f.read()
-        for rule in ("Excerpts come from the named source lines", "READ it off the calendar",
+        for rule in ("Excerpts come from the named source lines",
                      "Salience tracks structural role", "Output only a valid JSON array"):
             self.assertIn(rule, text)
             if house is not None:          # the House prompt exists only in the House copy
@@ -908,12 +929,15 @@ class Dates(unittest.TestCase):
             self.assertEqual(res["calls"][-1].get("retry"), "date")
             self.assertIn("last Friday = Friday 14 July 2023", w.calendar_block("2023-07-15"))
 
-    def test_both_prompts_carry_the_calendar_rule(self):
-        for name in [n for n in ("house", "public") if os.path.exists(w.PROMPTS[n])]:
-            with open(w.PROMPTS[name], encoding="utf-8") as f:
-                text = f.read()
-            self.assertIn("READ it off the calendar", text)
-            self.assertIn("Never hedge a date", text)
+    def test_builtin_prompt_keeps_time_words_as_spoken(self):
+        with open(w.PROMPTS["public"], encoding="utf-8") as f:
+            prompt = f.read()
+        self.assertIn('Keep time words as the chat said them (for example, "last night").', prompt)
+        self.assertIn("Never turn them into dates or clock times the chat did not say.", prompt)
+        self.assertNotIn("READ it off the calendar", prompt)
+        example = json.loads(prompt.split("```json\n", 1)[1].split("```", 1)[0])
+        self.assertIn("last night", example[0]["summary"])
+        self.assertNotIn("13 March", example[0]["summary"])
 
 
 if __name__ == "__main__":

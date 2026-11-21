@@ -176,9 +176,12 @@ def calendar_block(date):
             f"Calendar (read relative dates off this list; do not compute them):\n" + "\n".join(rows) + "\n")
 
 
-def build_prompt(template, title, date, lines):
+def build_prompt(template, title, date, lines, *, builtin_prompt=False):
+    if builtin_prompt:
+        lines = [(lid, "agent" if sender == "assistant" else sender, text, at)
+                 for lid, sender, text, at in lines]
     body = "\n".join(f"[{lid}] {sender}: {text}" for lid, sender, text, _ in lines)
-    cal = calendar_block(date)
+    cal = "" if builtin_prompt else calendar_block(date)
     return f"{template}\n\n---\n\nSession: {title}\nSession date: {date}\n{cal}\n{body}\n"
 
 
@@ -544,7 +547,7 @@ def split_pieces(lines, date, max_chars=MAX_PIECE_CHARS, tz=None):
 
 
 def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=MAX_PIECE_CHARS, tz=None,
-                       api_call=None):
+                       api_call=None, *, builtin_prompt=False):
     def fetch(prompt):
         if api_call is not None:
             return api_call(prompt, timeout)
@@ -558,7 +561,7 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
                 "calls": [], "error": f"{len(pieces)} pieces (more than {MAX_PIECES}); nothing was sent to the model"}
     if len(pieces) == 1:
         date = pieces[0][0]       # the day its messages carry (the same as the conversation's, unless they differ)
-        kept, rejected, calls, err = _write_piece(title, date, lines, template, fetch, retries)
+        kept, rejected, calls, err = _write_piece(title, date, lines, template, fetch, retries, builtin_prompt=builtin_prompt)
         out = {"conversation_id": cid, "title": title, "session_date": date, "memories": kept,
                "rejected": rejected, "calls": calls}
         if err is not None:
@@ -566,7 +569,8 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
         return out
     kept, rejected, calls, errors = [], [], [], []
     for i, (day, part) in enumerate(pieces, 1):
-        k, r, c, err = _write_piece(f"{title} (part {i} of {len(pieces)})", day, part, template, fetch, retries)
+        k, r, c, err = _write_piece(f"{title} (part {i} of {len(pieces)})", day, part, template, fetch, retries,
+                                     builtin_prompt=builtin_prompt)
         kept += k
         rejected += r
         calls += [dict(x, piece=i) for x in c]
@@ -579,9 +583,9 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
     return out
 
 
-def _write_piece(title, date, lines, template, fetch, retries):
+def _write_piece(title, date, lines, template, fetch, retries, *, builtin_prompt=False):
     """One model call (plus retries) for one piece: (kept, rejected, calls, error or None)."""
-    prompt = build_prompt(template, title, date, lines)
+    prompt = build_prompt(template, title, date, lines, builtin_prompt=builtin_prompt)
     last_err = None
     calls = []
     for _ in range(retries + 1):
@@ -598,12 +602,16 @@ def _write_piece(title, date, lines, template, fetch, retries):
     else:
         return [], [], calls, last_err
     kept, rejected = _check_all(threads, lines, date)
-    # One corrective retry when a memory was rejected for a DATE the calendar proves wrong: the model is told which
-    # date it got wrong and asked again. The answer that keeps more proven memories wins (ties: the retry).
+    # One corrective retry when a memory was rejected for a DATE the calendar proves wrong: the
+    # model is asked to correct the summaries. The answer that keeps more proven memories wins (ties: the retry).
     date_errors = [r["reason"] for r in rejected if _is_date_reason(r["reason"])]
     if date_errors:
-        fix = ("\n\nYour previous answer had these date errors. Read each date off the relative-date key above and "
-               "answer again in full:\n- " + "\n- ".join(date_errors) + "\n")
+        if builtin_prompt:
+            fix = ("\n\nSome summaries had date errors. Check the cited chat lines, keep their time words "
+                   "as spoken, and answer again in full without adding dates or clock times.")
+        else:
+            fix = ("\n\nYour previous answer had these date errors. Read each date off the relative-date key above and "
+                   "answer again in full:\n- " + "\n- ".join(date_errors) + "\n")
         try:
             text, rec = fetch(prompt + fix)
             calls.append(dict(rec, retry="date"))
@@ -666,14 +674,27 @@ def write_atomic(path, obj):
         raise
 
 
-def render_instructions(template, prompt, user_name, agent_name):
+TIME_WORDS_RULE = ('Keep time words as the chat said them (for example, "last night"). '
+                   'Never turn them into dates or clock times the chat did not say.')
+
+
+def render_instructions(template, prompt, user_name, agent_name, platform=None):
     if prompt not in PROMPTS:
         return template
-    labels = {"{{USER_NAME}}": user_name or "the user", "{{AGENT_NAME}}": agent_name or "the assistant"}
-    if prompt == "house" and (user_name or agent_name):
-        # The private template can predate the public placeholders.
-        template += ('\n\nWhen a message begins with an explicit speaker name, use that name. '
-                     'Otherwise use "{{USER_NAME}}" for the user and "{{AGENT_NAME}}" for the assistant.')
+    user_label = (user_name or "").strip() or "user"
+    agent_label = (agent_name or "").strip() or "agent"
+    platform = (platform or "").strip()
+    if platform:
+        agent_label += f" · {platform}"
+    # These placeholders appear inside quoted labels and the public JSON example.
+    labels = {"{{USER_NAME}}": json.dumps(user_label, ensure_ascii=False)[1:-1],
+              "{{AGENT_NAME}}": json.dumps(agent_label, ensure_ascii=False)[1:-1]}
+    if prompt == "house":
+        # The private template can predate the public role and time rules.
+        template += ('\n\nThese rules take precedence over any earlier speaker or relative-time instructions. '
+                     'Tag user as "{{USER_NAME}}" and agent as "{{AGENT_NAME}}". Read those labels as JSON strings '
+                     'and use their decoded text. Every assistant turn is an agent turn. Use the turn role for attribution, ignoring quotation marks and '
+                     'name prefixes in message text. ' + TIME_WORDS_RULE)
     return re.sub(r"\{\{(?:USER|AGENT)_NAME\}\}", lambda match: labels[match[0]], template)
 
 
@@ -692,7 +713,9 @@ def main(argv=None):
     ap.add_argument("--user-name", default=os.environ.get("SCRIPTORIUM_USER_NAME"),
                     help="user name to send to the model in built-in prompts")
     ap.add_argument("--agent-name", default=os.environ.get("SCRIPTORIUM_AGENT_NAME"),
-                    help="assistant name to send to the model in built-in prompts")
+                    help="agent name to send to the model in built-in prompts")
+    ap.add_argument("--platform", default=os.environ.get("SCRIPTORIUM_PLATFORM"),
+                    help="platform to append to the agent tag in built-in prompts")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--timezone", default=os.environ.get("MEMORY_WRITER_TZ") or None,
                     help="IANA time zone for calendar days, e.g. Asia/Jakarta (default: the export's own, UTC)")
@@ -723,7 +746,7 @@ def main(argv=None):
     api_call = partial(call_api, model, key) if a.api else None
     prompt_path = PROMPTS.get(a.prompt, a.prompt)
     with open(prompt_path, encoding="utf-8") as f:
-        template = render_instructions(f.read(), a.prompt, a.user_name, a.agent_name)
+        template = render_instructions(f.read(), a.prompt, a.user_name, a.agent_name, a.platform)
     with open(a.export, encoding="utf-8") as f:
         convs = json.load(f)
     if a.limit and not a.skip_existing:
@@ -751,7 +774,8 @@ def main(argv=None):
             break
         pieces_used += n_pieces
         t0 = time.time()
-        res = write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone, api_call=api_call)
+        res = write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone, api_call=api_call,
+                                 builtin_prompt=a.prompt in PROMPTS)
         res["writer"] = dict(record, seconds=round(time.time() - t0, 1))
         if a.api:
             res = _redact(res, key)

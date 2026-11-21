@@ -66,7 +66,7 @@ Prefer not to keep a computer on? The pen can also run in your own free Cloudfla
 
 When running `engine/write_notes.py` by hand, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
 
-Use `--user-name` and `--agent-name` to give the built-in notes prompt speaker names. The MCP server reads these from `SCRIPTORIUM_USER_NAME` and `SCRIPTORIUM_AGENT_NAME` in its environment. Configured names go to the model you choose.
+The built-in notes prompt tags speakers as `user` and `agent`. Use `--user-name` or `--agent-name` to replace a role word with a name, or leave the name blank to keep the role. Add `--platform Discord` for a tag such as `agent · Discord`. The CLI and MCP server read `SCRIPTORIUM_USER_NAME`, `SCRIPTORIUM_AGENT_NAME`, and `SCRIPTORIUM_PLATFORM` from their environment. These settings go to the selected model. The prompt keeps time words such as “last night” as spoken.
 
 Everything runs on your own computer. Your conversations go only to the model you choose.
 

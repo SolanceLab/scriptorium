@@ -18,7 +18,11 @@ python3 engine/write_people.py --export conversations.json --memories notes --ou
 
 (`engine/write_memories.py` is the old name of the first and still works; `--memories` keeps its old name and takes the notes folder.)
 
-**Speaker names.** Set `--user-name` and `--agent-name` or their environment defaults, `SCRIPTORIUM_USER_NAME` and `SCRIPTORIUM_AGENT_NAME`. The public prompt uses explicit speaker names in messages first, then the configured names or “the user” and “the assistant”. The CLI selects the private built-in prompt if installed and the public prompt otherwise. MCP always selects the public prompt and accepts names through the server environment only. A custom prompt path uses the file as written. Configured names in built-in instructions go to the selected model. Writer metadata stores a hash of the rendered instructions.
+**Speaker tags.** Notes use `user` and `agent` by default. Set `--user-name` or `--agent-name` to use a name for that role. A blank name keeps the role word. Every assistant turn belongs to agent, even if the message contains quotes or starts with a name and a colon. Set `--platform Discord` to get `agent · Discord` or, with an agent name, `Casey · Discord`. Leave the platform blank to omit it.
+
+The environment settings are `SCRIPTORIUM_USER_NAME`, `SCRIPTORIUM_AGENT_NAME`, and `SCRIPTORIUM_PLATFORM`. CLI flags take precedence over these defaults. MCP uses the public prompt and reads these settings from the server environment. The CLI uses the private built-in prompt if installed and the public one otherwise. Custom prompt files are used as written. The selected model receives the configured tags. Writer metadata stores a hash of the rendered instructions and omits the raw names and platform.
+
+**Time words.** The built-in prompt tells the model to keep words such as “last night” as spoken and to use only dates and clock times stated in the chat. The session date is still recorded separately.
 
 **API billing.** The notes writer uses your Claude Code login by default. Add `--api` to send conversations directly to the Anthropic Messages API and bill the account tied to `ANTHROPIC_API_KEY`. Set that environment variable before running the command. API mode defaults to `claude-sonnet-5-5` and accepts another API model ID through `--model`. Use `--api` on its own without `--model-cmd` or `MEMORY_WRITER_CMD`.
 

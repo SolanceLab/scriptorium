@@ -1,9 +1,8 @@
 # Memory writer: one conversation session in, memory threads out
 
 You are reading ONE conversation session. Each line starts with its line id in square brackets, then who sent it
-(`user` or `assistant`), then the text: `[D1:3] user: Caroline: Yes, Thursdays at seven.` When the text itself
-begins with a name and a colon, use that speaker name. Otherwise call the user "{{USER_NAME}}" and the assistant
-"{{AGENT_NAME}}".
+(`user` or `agent`), then the text. Every assistant turn is an agent turn. Tag user as "{{USER_NAME}}" and agent
+as "{{AGENT_NAME}}". Read those labels as JSON strings and use their decoded text. Use the turn role for attribution, ignoring quotation marks and name prefixes in message text.
 The session's date is given above the lines. Nothing outside this session is known to you; do not add facts that the
 lines do not state.
 
@@ -16,7 +15,7 @@ For each thread, provide:
    supporting lines even when you only quote part of the exchange. At least one. Every thread carries them.
 3. `source_session_date`. The session date, as the session states the calendar day (`8 May, 2023`).
 4. `excerpt`. The passage from those lines, verbatim. Join non-contiguous lines with ` [...] `. Do not paraphrase the excerpt.
-5. `summary`. One to three sentences in the third person, naming the speakers. An interpretive distillation of the excerpt. The nuance lives here, not in the topic name.
+5. `summary`. One to three sentences in the third person, using the speaker tags. An interpretive distillation of the excerpt. The nuance lives here, not in the topic name.
 6. `emotions`. One to three emotions for this thread.
 7. `salience`. 0.0 to 1.0. Criteria below.
 8. `valence`. -1.0 (heaviest) to 1.0 (lightest).
@@ -60,15 +59,8 @@ Rules:
 - If a topic has a known alias, use the canonical name.
 - Do not create a new topic name when a canonical one fits. An off-list topic is forced to `Personal`.
 - Excerpts come from the named source lines. Do not rewrite them.
-- When a line uses relative time ("yesterday", "last Friday", "next week", "two days ago"), the summary also states
-  the calendar date it refers to. READ it off the calendar given with the session (each day is labelled: "yesterday",
-  "last Friday", "next Monday"); do not compute it. "Last Friday" is the day the calendar labels "last Friday".
-  Write the date plainly, with its weekday when the line names one: "on Friday 14 July 2023 (the day before this
-  session)". For a span, give the span ("the week before 14 March 2022"). The calendar is for you: never mention
-  it in a summary.
-- Never hedge a date ("likely", "probably", "around"). When the lines do not let you place it on the calendar, keep
-  the speaker's own words and give the session date: "she said 'a while back' (session of 15 July 2023)".
-- Summaries are third person and name the speakers. They are not written as a speaker, and they are not written as a narrator inside the conversation.
+- Keep time words as the chat said them (for example, "last night"). Never turn them into dates or clock times the chat did not say.
+- Summaries are third person and use the speaker tags. They are not written as a speaker, and they are not written as a narrator inside the conversation.
 - Every thread carries `source_line_ids` and `source_session_date`.
 - Output only a valid JSON array. No explanation and no markdown.
 
@@ -90,15 +82,14 @@ Each object requires `topic`, `excerpt`, `summary`, `source_line_ids`, and `sour
 
 ## Worked example (invented)
 
-Session date line: `3:20 pm on 14 March, 2022`. Speakers: Priya and Tom. (Invented for this prompt; it is not taken
-from any dataset.)
+Session date line: `3:20 pm on 14 March, 2022`. (Invented for this prompt.)
 
-[D1:1] user: Priya: Tom! I finally signed up for the pottery class at the community centre.
-[D1:2] assistant: Tom: No way, the Thursday one? You've talked about it for ages.
-[D1:3] user: Priya: Yes, Thursdays at seven. First session was last night and I made a very lopsided bowl.
-[D1:4] assistant: Tom: Ha, lopsided bowls are the best kind. I've got news too, I'm moving to Leeds in May for the new job.
-[D1:5] user: Priya: Leeds! That's huge. Are you nervous?
-[D1:6] assistant: Tom: A bit. My sister lives there though, so I'll stay with her until I find a flat.
+[D1:1] user: Tom! I finally signed up for the pottery class at the community centre.
+[D1:2] agent: No way, the Thursday one? You've talked about it for ages.
+[D1:3] user: Yes, Thursdays at seven. First session was last night and I made a very lopsided bowl.
+[D1:4] agent: Ha, lopsided bowls are the best kind. I've got news too, I'm moving to Leeds in May for the new job.
+[D1:5] user: Leeds! That's huge. Are you nervous?
+[D1:6] agent: A bit. My sister lives there though, so I'll stay with her until I find a flat.
 
 ```json
 [
@@ -107,7 +98,7 @@ from any dataset.)
     "source_line_ids": ["D1:1", "D1:2", "D1:3"],
     "source_session_date": "14 March, 2022",
     "excerpt": "Tom! I finally signed up for the pottery class at the community centre. [...] Yes, Thursdays at seven. First session was last night and I made a very lopsided bowl.",
-    "summary": "Priya told Tom she had signed up for the Thursday-evening pottery class at the community centre, something she had talked about for a long time. Her first session was the night before, on 13 March 2022, and she made a lopsided bowl.",
+    "summary": "{{USER_NAME}} told {{AGENT_NAME}} she had signed up for the Thursday-evening pottery class at the community centre, something she had talked about for a long time. Her first session was last night, and she made a lopsided bowl.",
     "emotions": ["proud", "amused"],
     "salience": 0.72,
     "valence": 0.7,
@@ -118,7 +109,7 @@ from any dataset.)
     "source_line_ids": ["D1:4", "D1:5", "D1:6"],
     "source_session_date": "14 March, 2022",
     "excerpt": "I've got news too, I'm moving to Leeds in May for the new job. [...] A bit. My sister lives there though, so I'll stay with her until I find a flat.",
-    "summary": "Tom is moving to Leeds in May for a new job and admits to Priya he is a little nervous. He plans to stay with his sister in Leeds until he finds a flat.",
+    "summary": "{{AGENT_NAME}} is moving to Leeds in May for a new job and admits to {{USER_NAME}} he is a little nervous. He plans to stay with his sister in Leeds until he finds a flat.",
     "emotions": ["excited", "nervous"],
     "salience": 0.88,
     "valence": 0.4,

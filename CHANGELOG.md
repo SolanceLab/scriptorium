@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.7.0
 
-The public notes prompt asks for named speakers and citations for every supporting line, including the reply that settles a claim. Configure speaker names through CLI flags or the server environment. The writer can recover a missing citation for a fragment that matches one message in the same model call and records the added IDs in the notes JSON. These changes affect newly written files only.
+Notes tag speakers as `user` and `agent` by default. You can set one name for each role and add a platform to the agent tag, such as `agent · Discord`. Every assistant turn uses the same tag. The built-in prompt keeps time words such as “last night” as spoken.
+
+The public prompt asks for citations for every supporting line, including the reply that settles a claim. When a fragment matches one message in the same model call, the writer can recover its missing citation and record the added ID in the notes JSON. These changes affect newly written files only.
 
 ## 1.6.0
 
