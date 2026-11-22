@@ -1,6 +1,6 @@
 # How it works, in depth
 
-0. **Entries.** Your AI writes its own [entries](pen.md). The notes writer keeps its output in a separate folder.
+0. **Journal.** Your AI writes its own [journal entries](pen.md). The notes writer keeps its output in a separate folder.
 1. **Notes.** The writer sends a conversation or a piece of one to the model. The public instructions in `engine/prompt-public.md` ask for a topic, summary, exact excerpt, citations, date, salience, valence, and emotions. They ask the model to cite every line that supports a claim, including the reply that settles it.
 2. **Checked before kept.** Each excerpt fragment must appear word for word within one cited message after whitespace normalization. The writer may add a citation for a missing fragment of at least six words if it matches at word boundaries in exactly one message of the same model call and the excerpt follows transcript order. The raw notes include the recovered citations in `source_line_ids` and list them in `added_line_ids`. This verifies the quote's location. The summary's factual support still depends on what the cited messages say. The date check uses the model's original citations and rejects hedged dates, mismatched weekdays, and incorrect relative dates it can establish from those messages.
 3. **People cards.** `write_people` reads all of one person's notes at once. The model names the notes each fact rests on; the code assembles the exact words and line ids from those notes, so a quote can never be paraphrased. Code, not the model, decides who gets a card.

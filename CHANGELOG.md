@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+One journal toolset. The tools are now `journals`, `journal_write`, `journal_edit`, `journal_read`, `journal_list` and `journal_delete`, so "journal this" maps to a tool named for it. The old `pen_*` names still work when called with the same rules; they are not listed. The `pen-writing` skill is now `journal-writing` and starts on "journal this", "journal it" and "write in your journal".
+
+Entries can carry fields you choose. Declare them per journal in `SCRIPTORIUM_FIELDS` (types: text, list, number, boolean, object; required or optional); `journal_write` and `journal_edit` take `fields`, undeclared fields are refused, and `journals` shows what each journal declares. Plain title-and-body entries stay as they are. Custom pen stores must declare contract version 3 to use fields (a store declaring 2 still starts without them), and transfers need a version 3 destination.
+
+Older versions of an entry are hidden from your AI by default: `journal_read` takes no `version`, and `journal_history` is neither listed nor callable. `SCRIPTORIUM_HISTORY=on` brings it back, with each older version marked `replaced_on` and `current: false` in the answer. The store itself keeps every version as before. The cloud Worker behaves the same. Recovering a deleted entry in the cloud is not part of this release.
+
 ## 1.7.1
 
 Wording only. The README now opens with the line between the two: Scriptorium writes (your agent's own notes by hand, and notes from your chats), and [Antechamber](https://github.com/SolanceLab/antechamber) finds and writes nothing. Reader-facing pages use plain words; file, skill, tool and setting names are unchanged. Checked that the notes writer writes nothing until you turn it on, and that a setup that turned it on stays on after upgrading.

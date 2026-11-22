@@ -76,7 +76,7 @@ class ConfigureTests(Base):
         os.environ['PRIMARY_REF'] = PRIMARY
         self.configure({'PRIMARY_REF': ['first', 'second']})
         self.assertEqual(server.Config.keys[PRIMARY], ('first', 'second'))
-        self.assertIn(('first', 'second'), server.Config.shared_tools)
+        self.assertIn((('first', 'second'), False), server.Config.shared_tools)
 
     def test_notebook_setting_precedence(self):
         pooled = server.pooled
@@ -102,8 +102,8 @@ class SharedToolTests(Base):
 
     def test_listing_requires_an_agent_enum_and_leaves_pen_tools_alone(self):
         before = copy.deepcopy(server.PEN_TOOLS)
-        pen = [t for t in listing(self.binding) if t['name'].startswith('pen_')]
-        self.assertEqual(len(pen), 7)
+        pen = [t for t in listing(self.binding) if t['name'].startswith('journal')]
+        self.assertEqual(len(pen), 6)
         for tool in pen:
             schema = tool['inputSchema']
             self.assertEqual(schema['properties']['agent']['enum'], ['first', 'second'])
@@ -147,7 +147,7 @@ class SharedToolTests(Base):
             finally:
                 conn.close()
         tools = post(SHARED, 'tools/list')['tools']
-        self.assertTrue(all('agent' in t['inputSchema']['required'] for t in tools if t['name'].startswith('pen_')))
+        self.assertTrue(all('agent' in t['inputSchema']['required'] for t in tools if t['name'].startswith('journal')))
         result = post(SHARED, 'tools/call', {'name': 'pen_write', 'arguments': {'agent': 'second', 'collection': 'c', 'body': 'x'}})
         self.assertFalse(result['isError'])
         listed = post(SHARED, 'tools/call', {'name': 'pen_collections', 'arguments': {'agent': 'first'}})
@@ -156,6 +156,7 @@ class SharedToolTests(Base):
 
     def test_pool_and_silos_over_http(self):
         settings = {
+            'SCRIPTORIUM_HISTORY': 'on',
             'SCRIPTORIUM_SILO': json.dumps({'*': {'*': 'silo'}, 'second': {'shown': 'pool'}}),
             'SCRIPTORIUM_SURFACES': json.dumps({'SHARED_KEY': 'desktop'}),
         }

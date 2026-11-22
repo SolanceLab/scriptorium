@@ -11,6 +11,7 @@ except ImportError:  # Windows: no fcntl, lock one byte with msvcrt instead
     import msvcrt
 import threading
 import json
+import math
 import ntpath
 import os
 import re
@@ -22,7 +23,9 @@ from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 
 
-PEN_CONTRACT_VERSION = 2
+PEN_CONTRACT_VERSION = 3    # 3 adds `fields` (customisable entry fields) to write and edit
+MAX_FIELD_DEPTH = 32
+FIELD_TYPES = ('text', 'list', 'number', 'boolean', 'object')
 
 
 def validate_surface(surface):
@@ -37,6 +40,103 @@ def stamp_surface(record, surface):
     else:
         validate_surface(surface)
         record['surface'] = surface
+
+
+def field_spec(spec):
+    """One declared field, "<type>" or {"type": "<type>", "required": true}, as {"type", "required"}."""
+    if isinstance(spec, str):
+        spec = {'type': spec}
+    if (not isinstance(spec, dict) or not spec.keys() <= {'type', 'required'}
+            or spec.get('type') not in FIELD_TYPES or type(spec.get('required', False)) is not bool):
+        raise ValueError('invalid field declaration')
+    return {'type': spec['type'], 'required': spec.get('required', False)}
+
+
+def _json_safe(value, depth=0):
+    if depth > MAX_FIELD_DEPTH:
+        raise ValueError('too deeply nested')
+    if value is None or type(value) is bool or type(value) is int:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError('not a finite number')
+        return
+    if isinstance(value, str):
+        value.encode('utf-8')
+    elif isinstance(value, list):
+        for item in value:
+            _json_safe(item, depth + 1)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError('object keys must be text')
+            key.encode('utf-8')
+            _json_safe(item, depth + 1)
+    else:
+        raise ValueError('not JSON')
+
+
+def _value_fits(kind, value):
+    try:
+        if kind == 'text':
+            return isinstance(value, str) and value.encode('utf-8') is not None
+        if kind == 'list':
+            return isinstance(value, list) and all(isinstance(i, str) and i.encode('utf-8') is not None for i in value)
+        if kind == 'number':
+            return type(value) in (int, float) and math.isfinite(value)
+        if kind == 'boolean':
+            return type(value) is bool
+        _json_safe(value, 1)    # a field value sits one level down, as stored_fields counts it
+        return isinstance(value, dict)
+    except (ValueError, UnicodeError):
+        return False
+
+
+def check_fields(declared, given, creating):
+    """Check the `fields` of a write (creating) or an edit against a journal's declaration (field -> field_spec).
+
+    A null in an edit clears an optional field; a required field is never cleared and must be present on a write."""
+    if not isinstance(given, dict):
+        raise ValueError('fields must be an object')
+    allowed = ', '.join(sorted(declared)) or 'none: this journal declares no fields'
+    for name, value in given.items():
+        if name not in declared:
+            raise ValueError(f'field {name!r} is not declared for this journal; allowed fields: {allowed}')
+        spec = declared[name]
+        if value is None:
+            if creating:
+                raise ValueError(f'field {name!r} needs a value; null only clears a field when editing')
+            if spec['required']:
+                raise ValueError(f'field {name!r} is required and cannot be cleared')
+        elif not _value_fits(spec['type'], value):
+            raise ValueError(f'field {name!r} must be {spec["type"]}')
+    if creating:
+        missing = sorted(n for n, spec in declared.items() if spec['required'] and n not in given)
+        if missing:
+            raise ValueError('missing required fields: ' + ', '.join(missing))
+
+
+def stored_fields(fields):
+    """The rule for the `fields` a stored entry carries: a non-empty object of JSON-safe values (never null)."""
+    if (not isinstance(fields, dict) or not fields
+            or any(not isinstance(k, str) or not k or v is None for k, v in fields.items())):
+        raise ValueError('invalid entry fields')
+    try:
+        _json_safe(fields)
+        json.dumps(fields, allow_nan=False)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError('invalid entry fields') from None
+
+
+def merged_fields(current, incoming):
+    """The fields after an edit: incoming values replace or add, a null removes. {} or None when nothing is left."""
+    merged = dict(current or {})
+    for name, value in incoming.items():
+        if value is None:
+            merged.pop(name, None)
+        else:
+            merged[name] = value
+    return merged
 
 
 def snapshot_parts(snapshot):
@@ -56,8 +156,8 @@ def snapshot_parts(snapshot):
 class PenStore:
     """Hand-written record store contract; implementations scope every operation to writer."""
     def collections(self, writer, *, visible=None): raise NotImplementedError
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None): raise NotImplementedError
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None): raise NotImplementedError
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None): raise NotImplementedError
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): raise NotImplementedError
     def read(self, writer, id, version=None, *, visible=None): raise NotImplementedError
     def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): raise NotImplementedError
     def history(self, writer, id, *, visible=None): raise NotImplementedError
@@ -206,6 +306,8 @@ class LocalFilesPenStore(PenStore):
         self._fields(body, header.get('title'), header.get('pinned'))
         if 'surface' in header:
             validate_surface(header['surface'])
+        if 'fields' in header:
+            stored_fields(header['fields'])
         for field in ('created', 'edited'):
             value = header.get(field)
             if not isinstance(value, str) or dt.datetime.fromisoformat(value).utcoffset() is None:
@@ -267,8 +369,10 @@ class LocalFilesPenStore(PenStore):
             if staging.exists():
                 shutil.rmtree(staging)
 
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None):
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
         self._fields(body, title, pinned)
+        if fields is not None:
+            stored_fields(fields)
         if by_day is not None and type(by_day) is not bool:
             raise ValueError('by_day must be a boolean')
         with self._lock(writer):
@@ -284,6 +388,8 @@ class LocalFilesPenStore(PenStore):
             if title is not None:
                 record['title'] = title
             stamp_surface(record, surface)
+            if fields:
+                record['fields'] = fields
             if mode is None and not directory.exists():
                 staging = Path(tempfile.mkdtemp(prefix='.pen-', dir=directory.parent))
                 try:
@@ -299,8 +405,10 @@ class LocalFilesPenStore(PenStore):
                 self._install_entry(directory / id, [record])
             return id
 
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None):
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)
+        if fields is not None and not isinstance(fields, dict):
+            raise ValueError('invalid entry fields')
         if type(based_on) is not int or based_on < 1:
             raise ValueError('invalid based_on')
         with self._lock(writer):
@@ -317,8 +425,19 @@ class LocalFilesPenStore(PenStore):
                 record['pinned'] = pinned
             record.update(version=latest + 1, edited=self._now())
             stamp_surface(record, surface)
+            if fields:
+                self._merge_fields(record, fields)
             self._save(path / f'{latest + 1}.md', record)
             return latest + 1
+
+    @staticmethod
+    def _merge_fields(record, fields):
+        merged = merged_fields(record.get('fields'), fields)
+        if merged:
+            stored_fields(merged)
+            record['fields'] = merged
+        else:
+            record.pop('fields', None)
 
     def read(self, writer, id, version=None, *, visible=None):
         invalid = version is not None and (type(version) is not int or version < 1)
@@ -480,7 +599,7 @@ def main(argv=None):
     try:
         validate_writer(args.writer)
         source = load_store(args.source)
-        if getattr(source, 'contract_version', None) == PEN_CONTRACT_VERSION:
+        if getattr(source, 'contract_version', None) in (2, PEN_CONTRACT_VERSION):
             snapshot = source.export_snapshot(args.writer)
         else:
             records = source.export_pen(args.writer)

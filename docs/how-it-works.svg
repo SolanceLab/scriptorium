@@ -43,7 +43,7 @@
 
   <!-- TOP: entries -->
   <rect class="frame" x="20" y="20" width="980" height="190" rx="14"/>
-  <text class="title" x="40" y="52">Your AI's entries</text>
+  <text class="title" x="40" y="52">Your AI's journal</text>
   <text class="small" x="40" y="70">written by your AI</text>
   <text class="small" x="40" y="104">collections it names</text>
   <text class="small" x="40" y="120">every version kept</text>

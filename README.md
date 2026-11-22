@@ -2,11 +2,11 @@
 
 Made by House of Solance · free for noncommercial use · credit required
 
-Scriptorium writes entries and chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
+Scriptorium keeps your AI's journal and writes chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
 
-Your AI chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
+Your AI keeps a journal: it chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
 
-<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes entries in its own collections. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
+<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes journal entries in journals it names. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
 
 ## Quick start
 
@@ -26,15 +26,15 @@ claude plugin marketplace add SolanceLab/plugins
 claude plugin install scriptorium@solancelab
 ```
 
-Once the key is bound, your AI can write entries. To generate chat notes, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
+Once the key is bound, your AI can write in its journal. To generate chat notes, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
 
-Prefer not to keep a computer on? The entry tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
+Prefer not to keep a computer on? The journal tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
 
 ## What it is
 
-**Entries.** Your AI writes entries in collections it names, such as daily records, reflections, or lessons. Each entry keeps its revision history and can be pinned. Deleted entries are set aside for recovery.
+**Journal.** A journal is what your AI writes in its own words, as its own record. It can name a journal for any purpose: a daily journal, reflections, lessons, a summary. Each entry can be pinned and revised, and a deleted entry is set aside for recovery. A journal can declare its own fields, such as emotions, tags or a decision, set by you in `SCRIPTORIUM_FIELDS` ([entry fields](docs/pen.md#entry-fields)). Older versions of an entry stay in the store and are hidden from your AI unless you switch them on with `SCRIPTORIUM_HISTORY=on`, so it never reads replaced wording as current.
 
-**Who can write entries.** Each agent writes in its own collections. A key grants write access to every agent it is bound to. A key with no agent can use the extraction tools only. The extraction tools reject paths inside the entry store, and the notes writer keeps its output in a separate folder. See [Agents](docs/agents.md) for shared keys and reading permissions.
+**Who can write entries.** Each agent writes in its own journals. A key grants write access to every agent it is bound to. A key with no agent can use the extraction tools only. The extraction tools reject paths inside the entry store, and the notes writer keeps its output in a separate folder. See [Agents](docs/agents.md) for shared keys and reading permissions.
 
 **Chat notes.** The notes writer checks excerpts against the lines they came from. It can build a card for each recurring person and, if you schedule the nightly roster, use new messages to gather what people said about themselves.
 
@@ -58,19 +58,21 @@ Everything runs on your own computer. Your conversations go only to the model yo
 
 ## Tools
 
-**Entry tools** ([entry storage and tools](docs/pen.md))
+**Journal tools** ([journal storage and tools](docs/pen.md))
 
 | Tool | What it does |
 |---|---|
-| `pen_collections` | Lists your AI's collections and how many entries each holds. |
-| `pen_write` | Writes a new entry into a collection; the first write creates it. |
-| `pen_edit` | Revises an entry; the earlier version is kept. |
-| `pen_read` | Reads an entry, or any earlier version of it. |
-| `pen_list` | Lists a collection's entries, newest first; pinned only, or one day. |
-| `pen_history` | Every version of an entry, oldest first. |
-| `pen_delete` | Sets an entry aside with its history; nothing is erased. |
+| `journals` | Lists your AI's journals, the fields each declares, and how many entries each holds. |
+| `journal_write` | Writes a new entry into a journal; the first write creates it. |
+| `journal_edit` | Revises an entry; the earlier version is kept. |
+| `journal_read` | Reads the current version of an entry. |
+| `journal_list` | Lists a journal's entries, newest first; pinned only, or one day. |
+| `journal_history` | Every version of an entry, oldest first. Listed only when you set `SCRIPTORIUM_HISTORY=on`. |
+| `journal_delete` | Sets an entry aside with its history; nothing is erased. |
 
-The `pen-writing` skill tells your AI how to write entries it can find again later.
+The old `pen_*` names still work when called; they are not listed.
+
+The `journal-writing` skill tells your AI how to write entries it can find again later. It starts when you say "journal this", "journal it" or "write in your journal".
 
 **Chat extraction tools**
 

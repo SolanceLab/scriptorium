@@ -76,12 +76,12 @@ Current tools:
 ```
 | Key | Tools | Description chars | Serialized chars |
 | --- | --- | --- | --- |
-| one agent | 10 | 2271 | 5022 |
-| extraction only | 10 | 2271 | 5022 |
-| two agents | 10 | 2446 | 5735 |
+| one agent | 9 | 2893 | 5541 |
+| extraction only | 9 | 2893 | 5541 |
+| two agents | 9 | 3043 | 6152 |
 ```
 
-A shared key adds one `agent` argument to each of the seven entry tools. `write_notes` is one more tool, and `write_memories` stays beside it as the old name.
+A shared key adds one `agent` argument to each of the journal tools. The six journal tools (`journal_history` joins them with `SCRIPTORIUM_HISTORY=on`) plus `write_notes`, `write_memories` (the old name) and `write_people` make nine.
 
 ## Notebook sharing and surfaces
 
@@ -90,5 +90,7 @@ These settings are JSON objects on the local server or in the cloud Worker's env
 - `SCRIPTORIUM_SILO={"Mira":{"reflections":"silo","*":"pool"}}` keeps Mira's reflections private and opens her other notebooks to the pool. Use `"*"` in the agent position to apply a rule to everyone. A rule for a named notebook wins over a rule for all notebooks. At the same level, a rule for a named agent wins over a rule for everyone. Use the exact notebook spelling.
 - `SCRIPTORIUM_READS={"Echo":"own"}` lets Echo read only Echo's notebooks. Use `"pool"` to allow reading other agents' pooled notebooks. The default is `"pool"`. Agents can always read their own notebooks, including silos.
 - `SCRIPTORIUM_SURFACES={"DESKTOP_KEY":"desktop","WEB_KEY":"web"}` labels writes and edits by the key used. Use a separate key for each surface and bind each key to the agents who use it. The tools are the same across surfaces. Key references that resolve to the same secret must agree on its surface, including whether it has a label.
+
+- `SCRIPTORIUM_FIELDS` declares the fields a journal's entries may carry, and `SCRIPTORIUM_HISTORY=on` offers `journal_history` (see [Journal storage and tools](pen.md#entry-fields)). Both work the same on the local server and in the cloud Worker.
 
 New notebooks start in the pool. Notebooks created before this update start private. The settings above can open or close either kind. On a shared key, `agent` chooses who is acting and `of` chooses whose notebooks that agent wants to read. Someone holding the shared key can act as every agent it grants and read each agent's silos as that agent.

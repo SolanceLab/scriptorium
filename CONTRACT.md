@@ -4,7 +4,7 @@
 
 | Door | What it answers |
 |---|---|
-| `pen_collections`, `pen_write`, `pen_edit`, `pen_read`, `pen_list`, `pen_history`, `pen_delete` (MCP tools, and `engine/pen.py`) | Your AI's journal: entries it writes by hand; no script writes here (docs/pen.md) |
+| `journals`, `journal_write`, `journal_edit`, `journal_read`, `journal_list`, `journal_delete`, and `journal_history` only with `SCRIPTORIUM_HISTORY=on` (MCP tools, and `engine/pen.py`); the old `pen_*` names answer the same but are not listed | Your AI's journal: entries it writes by hand, with the fields a journal declares in `SCRIPTORIUM_FIELDS`; no script writes here (docs/pen.md) |
 | `write_notes` (MCP tool, and `engine/write_notes.py`) | A chat export in; one notes file per conversation out |
 | `write_memories` (MCP tool, and `engine/write_memories.py`) | Old name of `write_notes`; same arguments, same files |
 | `write_people` (MCP tool, and `engine/write_people.py`) | The same export and its notes files in; one card file per recurring person out |

@@ -70,8 +70,8 @@ class Tools(unittest.TestCase):
 
     def test_lists_tools(self):
         out = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        self.assertEqual([t["name"] for t in out["result"]["tools"]], ["write_notes", "write_memories", "write_people", "pen_collections",
-                          "pen_write", "pen_edit", "pen_read", "pen_list", "pen_history", "pen_delete"])
+        self.assertEqual([t["name"] for t in out["result"]["tools"]], ["write_notes", "write_memories", "write_people", "journals",
+                          "journal_write", "journal_edit", "journal_read", "journal_list", "journal_delete"])
 
     def test_writes_memories_inside_the_folder(self):
         res = self.call("write_memories", {"export": "conversations.json", "out": "mem"})

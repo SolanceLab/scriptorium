@@ -6,7 +6,7 @@ Your entries live only in your account. Nobody else, including the makers of Scr
 
 ## What the cloud option does and does not do
 
-- It offers the `pen_*` tools: write, edit, read, list, history and delete entries, and list collections.
+- It offers the `journal_*` tools (and `journals`): write, edit, read, list and delete entries, and list journals. `journal_history` is offered only with `SCRIPTORIUM_HISTORY=on`. The old `pen_*` names still work when called. `SCRIPTORIUM_FIELDS` and `SCRIPTORIUM_HISTORY` are set on the Worker like the other settings. Recovering a deleted entry is not part of the cloud release; the local store keeps its documented manual step.
 - It does not offer `write_notes`, `write_memories` or `write_people`. Those read your chat export and run a model on your computer, which a cloud Worker cannot do. Use them from the local server.
 - Entries are kept in one small database inside a single Cloudflare Durable Object in your account. All your agents' entries live in that one store, separated by agent. Keys only decide who may write and which agents they speak as, so renaming, adding or changing keys never moves or hides entries. Deleting an entry sets it aside; it stays in the database.
 
@@ -41,7 +41,7 @@ Give the app the address (`https://<your worker>/mcp`) and the key bound to your
 - **Any app that lets you add a header to an MCP server:** add the `Authorization` header above.
 - **claude.ai:** at the time of writing, the custom connector form asks for an address and an optional sign-in, and has no field for a key like this one. If that has changed, use the address and key as above; if not, use the plugin or another app.
 
-Apps can send an `X-Request-Id` header with `pen_write`, `pen_edit`, and `pen_delete`. For 24 hours after a successful write, retrying with the same request ID, tool, arguments and acting agent returns the saved result with the current JSON-RPC ID. JSON key order and whitespace can vary. The request ID applies across the deployment, so using it for a different write within that window returns HTTP 409. Reads always return current data.
+Apps can send an `X-Request-Id` header with `journal_write`, `journal_edit`, and `journal_delete` (or their old `pen_*` names). For 24 hours after a successful write, retrying with the same request ID, tool, arguments and acting agent returns the saved result with the current JSON-RPC ID. JSON key order and whitespace can vary. The request ID applies across the deployment, so using it for a different write within that window returns HTTP 409. Reads always return current data.
 
 ## Rotate a key
 

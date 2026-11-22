@@ -448,10 +448,10 @@ class OldOutputStillReads(unittest.TestCase):
             self.assertEqual([f["fact"] for f in facts], ["Moved to Lisbon."])
 
 
-RETIRED_WORDS = re.compile(r"(?i)\b(?:journal|pen|hand)\b")
+RETIRED_WORDS = re.compile(r"(?i)\b(?:pen|hand)\b")    # journal is the right word for the AI's own record
 ANTECHAMBER_URL = "https://github.com/SolanceLab/antechamber"
 FILES = ["README.md", "engine/README.md", "docs/how-it-works.md", "docs/how-it-works.svg", "docs/limits.md",
-         "CONTRACT.md", "plugin/skills/scriptorium/SKILL.md", "plugin/skills/pen-writing/SKILL.md",
+         "CONTRACT.md", "plugin/skills/scriptorium/SKILL.md", "plugin/skills/journal-writing/SKILL.md",
          "plugin/.claude-plugin/plugin.json", "plugin/.codex-plugin/plugin.json", ".claude-plugin/marketplace.json"]
 FALLBACK = ("If the server's tool list has no `write_notes`, the server is older than this skill: call "
             "`write_memories` with the same arguments; it writes the same files.")
@@ -513,7 +513,7 @@ class WordsSayNotes(unittest.TestCase):
     def test_opening_explains_who_writes_and_who_finds(self):
         readme = text_of("README.md")
         opening = readme.split("\n\n", 3)[2]    # title, maker line, then the opening sentence
-        self.assertEqual(opening, f"Scriptorium writes entries and chat notes, and [Antechamber]({ANTECHAMBER_URL}) "
+        self.assertEqual(opening, f"Scriptorium keeps your AI's journal and writes chat notes, and [Antechamber]({ANTECHAMBER_URL}) "
                                   "finds notes and chat lines without writing anything.")
         self.assertIn(f"[Antechamber]({ANTECHAMBER_URL})", text_of("docs/how-it-works.md"))
         self.assertIn("Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)", readme)
@@ -537,6 +537,17 @@ class WordsSayNotes(unittest.TestCase):
         order = [next(i for i, ln in enumerate(rows) if ln.startswith("| `%s`" % name))
                  for name in ("write_notes", "write_memories")]
         self.assertLess(order[0], order[1])
+
+    def test_journal_means_the_ais_own_writing_only(self):
+        readme = text_of("README.md")
+        self.assertIn("A journal is what your AI writes in its own words", readme)
+        for line in readme.splitlines():
+            if line.startswith(("| `write_notes`", "| `write_people`", "**Chat notes.**")):
+                self.assertNotRegex(line, r"(?i)\bjournal")
+        for rel in ("docs/how-it-works.md", "docs/limits.md"):
+            for line in text_of(rel).splitlines():
+                if re.search(r"(?i)\bnotes?\b", line) and "journal" in line.lower():
+                    self.assertRegex(line, r"(?i)not|never|Journal\.", line)
 
     def test_skill_falls_back_on_an_older_server(self):
         self.assertIn(FALLBACK, text_of("plugin/skills/scriptorium/SKILL.md"))
@@ -610,12 +621,12 @@ class WordsSayNotes(unittest.TestCase):
         readme = text_of("README.md")
         self.assertNotIn("to redo", readme.lower())
         alt = re.search(r'<img[^>]*src="docs/how-it-works\.svg"[^>]*alt="([^"]*)"', readme).group(1)
-        self.assertIn("writes entries", alt)
+        self.assertIn("writes journal entries", alt)
         self.assertIn("checks excerpts against their source lines", alt)
         self.assertIsNone(RETIRED_WORDS.search(alt))
         svg = ET.parse(os.path.join(ROOT, "docs", "how-it-works.svg")).getroot()
         drawing = "".join(svg.itertext())
-        self.assertIn("Your AI's entries", drawing)
+        self.assertIn("Your AI's journal", drawing)
         self.assertIn("Antechamber", drawing)
         self.assertIsNone(RETIRED_WORDS.search(drawing))
         links = svg.findall(".//{http://www.w3.org/2000/svg}a")

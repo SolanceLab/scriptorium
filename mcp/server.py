@@ -1,5 +1,5 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
-"""Scriptorium's MCP server: your AI's journal (the pen), plus notes and people cards written from a chat export.
+"""Scriptorium's MCP server: your AI's journal (journal_* tools), plus notes and people cards written from a chat export.
 
     SCRIPTORIUM_MCP_KEY=<a long random key> python3 mcp/server.py --root ~/scriptorium [--port 8795]
 
@@ -11,8 +11,9 @@ command or a prompt file. One write runs at a time. Standard library only.
 SCRIPTORIUM_AGENTS (or its 1.3.0 name, SCRIPTORIUM_WRITERS) maps key variable names to an agent or a list of agents;
 --port 0 picks a free port.
 
-Operator setting (environment, never from a request): SCRIPTORIUM_MODEL_CMD replaces the model command for every
-write, for running another provider or a local model.
+Operator settings (environment, never from a request): SCRIPTORIUM_MODEL_CMD replaces the model command for every
+write, for running another provider or a local model. SCRIPTORIUM_FIELDS declares the fields a journal's entries
+may carry; SCRIPTORIUM_HISTORY=on offers journal_history (older versions, marked as replaced).
 """
 import argparse
 import copy
@@ -31,15 +32,17 @@ from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The module keeps the writers in engine/writer; the public copy puts them in engine/.
+FIELDS_ENV = "SCRIPTORIUM_FIELDS"
 MAX_LIMIT = 50
 AGENTS_ENV = "SCRIPTORIUM_AGENTS"
+HISTORY_ENV = "SCRIPTORIUM_HISTORY"
 READS_ENV = "SCRIPTORIUM_READS"
 SURFACES_ENV = "SCRIPTORIUM_SURFACES"
 SILO_ENV = "SCRIPTORIUM_SILO"
 
 
 def pen_settings(env_get, agents, references):
-    from engine.pen import validate_writer
+    from engine.pen import field_spec, validate_writer
 
     def settings(name):
         raw = env_get(name)
@@ -51,22 +54,50 @@ def pen_settings(env_get, agents, references):
             raise ValueError(name + " must be a JSON object")
         return value
 
-    silo, reads, surfaces = (settings(name) for name in (SILO_ENV, READS_ENV, SURFACES_ENV))
-    for agent, collections in silo.items():
-        if agent != "*" and agent not in agents:
-            raise ValueError(SILO_ENV + ": unknown agent")
-        if not isinstance(collections, dict):
-            raise ValueError(SILO_ENV + ": expected collection settings")
-        spellings = set()
-        for collection, state in collections.items():
-            if collection != "*":
-                validate_writer(collection).encode("utf-8")
-                spelling = unicodedata.normalize("NFD", collection).casefold()
-                if spelling in spellings:
-                    raise ValueError(SILO_ENV + ": collection names collide")
-                spellings.add(spelling)
-            if state not in ("pool", "silo"):
-                raise ValueError(SILO_ENV + ": expected pool or silo")
+    silo, reads, surfaces, fields = (settings(name) for name in (SILO_ENV, READS_ENV, SURFACES_ENV, FIELDS_ENV))
+
+    def per_journal(name, setting, check):
+        """Walk {agent or *: {journal or *: value}}: known agents, valid journal names that do not collide."""
+        for agent, collections in setting.items():
+            if agent != "*" and agent not in agents:
+                raise ValueError(name + ": unknown agent")
+            if not isinstance(collections, dict):
+                raise ValueError(name + ": expected collection settings")
+            spellings = set()
+            for collection, state in collections.items():
+                if collection != "*":
+                    validate_writer(collection).encode("utf-8")
+                    spelling = unicodedata.normalize("NFD", collection).casefold()
+                    if spelling in spellings:
+                        raise ValueError(name + ": collection names collide")
+                    spellings.add(spelling)
+                collections[collection] = check(state)
+
+    def silo_state(state):
+        if state not in ("pool", "silo"):
+            raise ValueError(SILO_ENV + ": expected pool or silo")
+        return state
+
+    def declared(state):
+        if not isinstance(state, dict):
+            raise ValueError(FIELDS_ENV + ": expected a journal's fields as an object")
+        result = {}
+        for field, spec in state.items():
+            if not isinstance(field, str) or not field:
+                raise ValueError(FIELDS_ENV + ": a field needs a name")
+            field.encode("utf-8")
+            try:
+                result[field] = field_spec(spec)
+            except ValueError:
+                raise ValueError(FIELDS_ENV + ": a field is a type (text, list, number, boolean, object) "
+                                 "or {\"type\": ..., \"required\": true}") from None
+        return result
+
+    per_journal(SILO_ENV, silo, silo_state)
+    per_journal(FIELDS_ENV, fields, declared)
+    history = env_get(HISTORY_ENV)
+    if history not in (None, "on", "off"):
+        raise ValueError(HISTORY_ENV + " must be on or off")
     for agent, state in reads.items():
         if agent not in agents or state not in ("own", "pool"):
             raise ValueError(READS_ENV + ": expected a configured agent and own or pool")
@@ -79,13 +110,20 @@ def pen_settings(env_get, agents, references):
         surface = surfaces.get(ref)
         if by_secret.setdefault(secret, surface) != surface:
             raise ValueError(SURFACES_ENV + ": one key cannot have different surfaces")
-    return (frozenset(agents), silo, reads), by_secret
+    return (frozenset(agents), silo, reads), by_secret, fields, history == "on"
 
 
 def pooled(silo, owner, collection, default):
     named = silo.get(owner, {})
     everyone = silo.get("*", {})
     return named.get(collection, everyone.get(collection, named.get("*", everyone.get("*", default)))) == "pool"
+
+
+def declared_fields(fields, owner, journal):
+    """The fields declared for one agent's journal: a named agent beats *, a named journal beats * (as for the silo)."""
+    named = fields.get(owner, {})
+    everyone = fields.get("*", {})
+    return named.get(journal, everyone.get(journal, named.get("*", everyone.get("*", {}))))
 
 
 
@@ -150,29 +188,57 @@ _OF = {"type": "string", "description": "Notebook owner. Defaults to the acting 
 _SURFACE = {"type": "string", "description": "Surface of the current version."}
 _BOOL = {"type": "boolean"}
 
-_PEN_READS = {"pen_read", "pen_history", "pen_list", "pen_collections"}
-_PEN_ARGUMENT_TYPES = {"string": str, "boolean": bool, "integer": int}
-PEN_TOOLS = [
-    {"name": name, "description": description,
-     "inputSchema": {"type": "object", "properties": properties,
-                     "required": required, "additionalProperties": False}}
-    for name, description, properties, required in [
-        ("pen_collections", "List collections and counts of active entries. Use of for another agent's pooled collections.", {"of": _OF}, []),
-        ("pen_write", "Write an entry. On first write, set by_day to group by creation day.",
-         {"collection": _TEXT, "body": _TEXT, "title": _TEXT, "pinned": _BOOL, "by_day": _BOOL},
+_OBJECT = {"type": "object"}
+# What a journal is, said once in every description that creates or finds one.
+_HISTORY_HIDDEN = " Older versions of an entry are kept by the store and are not offered."
+_JOURNAL = ("A journal is what you write by your own hand, as your own record; name one for any purpose "
+            "(a journal, reflections, lessons, a summary). ")
+
+_PEN_ARGUMENT_TYPES = {"string": str, "boolean": bool, "integer": int, "object": dict}
+# tool name -> (store method, a read?); the listed names. Every old pen_* name is an unlisted alias of one of these.
+PEN_ALIASES = {"pen_collections": "journals", "pen_write": "journal_write", "pen_edit": "journal_edit",
+               "pen_read": "journal_read", "pen_list": "journal_list", "pen_history": "journal_history",
+               "pen_delete": "journal_delete"}
+JOURNAL_METHODS = {"journals": ("collections", True), "journal_write": ("write", False), "journal_edit": ("edit", False),
+                   "journal_read": ("read", True), "journal_list": ("list", True), "journal_history": ("history", True),
+                   "journal_delete": ("delete", False)}
+STORE_METHODS = tuple(method for method, _ in JOURNAL_METHODS.values())    # what a PenStore must provide
+
+
+def _journal_tools(history):
+    """The listed journal tools. With history off there is no journal_history and journal_read has no version."""
+    read = {"id": _TEXT, "of": _OF}
+    if history:
+        read["version"] = _POSITIVE
+    rows = [
+        ("journals", "List your journals (each with the fields it declares) and the counts of active entries. "
+                     "Use of for another agent's pooled journals. " + _JOURNAL, {"of": _OF}, []),
+        ("journal_write", "Write a journal entry. " + _JOURNAL + "On first write to a journal, set by_day to group by "
+                          "creation day. A journal may declare its own fields: check `journals`, then pass them in `fields`.",
+         {"collection": dict(_TEXT, description="The journal's name."), "body": _TEXT, "title": _TEXT, "pinned": _BOOL,
+          "by_day": _BOOL, "fields": dict(_OBJECT, description="Values for the fields this journal declares.")},
          ["collection", "body"]),
-        ("pen_edit", "Edit an entry using its current version as based_on.",
-         {"id": _TEXT, "based_on": _POSITIVE, "body": _TEXT, "title": _TEXT, "pinned": _BOOL},
+        ("journal_edit", "Edit a journal entry using its current version as based_on. `fields` merges into the entry's "
+                         "fields; a null clears an optional one.",
+         {"id": _TEXT, "based_on": _POSITIVE, "body": _TEXT, "title": _TEXT, "pinned": _BOOL,
+          "fields": dict(_OBJECT, description="Fields to set or change; null clears an optional field.")},
          ["id", "based_on"]),
-        ("pen_read", "Read the latest or a specific version of an entry.",
-         {"id": _TEXT, "version": _POSITIVE, "of": _OF}, ["id"]),
-        ("pen_list", "List active entries in a collection, newest first.",
-         {"collection": _TEXT, "pinned_only": _BOOL, "day": _TEXT, "limit": _POSITIVE, "of": _OF, "surface": _SURFACE}, ["collection"]),
-        ("pen_history", "Read all versions of an entry, oldest first.", {"id": _TEXT, "of": _OF}, ["id"]),
-        ("pen_delete", "Move an entry and its history aside for recovery.", {"id": _TEXT}, ["id"]),
+        ("journal_read", "Read the current version of a journal entry" + (", or an older one with version." if history else "." + _HISTORY_HIDDEN),
+         read, ["id"]),
+        ("journal_list", "List active journal entries in one journal, newest first.",
+         {"collection": dict(_TEXT, description="The journal's name."), "pinned_only": _BOOL, "day": _TEXT,
+          "limit": _POSITIVE, "of": _OF, "surface": _SURFACE}, ["collection"]),
+        ("journal_history", "Read all versions of a journal entry, oldest first. Each older version is marked "
+                            "replaced_on and current: false.", {"id": _TEXT, "of": _OF}, ["id"]),
+        ("journal_delete", "Move a journal entry and its history aside for recovery.", {"id": _TEXT}, ["id"]),
     ]
-]
-_PEN_SCHEMAS = {tool["name"]: tool["inputSchema"] for tool in PEN_TOOLS}
+    return [{"name": name, "description": description,
+             "inputSchema": {"type": "object", "properties": properties, "required": required,
+                             "additionalProperties": False}}
+            for name, description, properties, required in rows if history or name != "journal_history"]
+
+
+PEN_TOOLS = _journal_tools(False)       # the default listing; SCRIPTORIUM_HISTORY=on adds journal_history
 
 
 def _with_agent(tool, agents):
@@ -185,8 +251,8 @@ def _with_agent(tool, agents):
     return tool
 
 
-def _shared_pen_tools(agents):
-    return [_with_agent(t, agents) for t in PEN_TOOLS]
+def _shared_pen_tools(agents, history=False):
+    return [_with_agent(t, agents) for t in _journal_tools(history)]
 
 
 class Config:
@@ -194,10 +260,11 @@ class Config:
     key = ""
     keys = {}
     pen = None
-    pen_tools = PEN_TOOLS
     key_refs = set()
     surfaces = {}
     policy = (frozenset(), {}, {})
+    fields = {}           # SCRIPTORIUM_FIELDS, checked: {agent or *: {journal or *: {field: {type, required}}}}
+    history = False       # SCRIPTORIUM_HISTORY=on
     shared_tools = {}     # agent tuple -> the pen tools a key shared by those agents lists
 
 
@@ -309,7 +376,16 @@ def _error(rid, code, message):
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
-def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
+def _older(record, newer):
+    """A copy of an older version marked, in the answer only, with when it was replaced."""
+    return dict(record, replaced_on=newer["edited"], current=False)
+
+
+def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
+    """One journal tool call (a listed name or an old pen_* alias) -> (text, is_error)."""
+    name = PEN_ALIASES.get(name, name)
+    fields = Config.fields if fields is None else fields
+    history = Config.history if history is None else history
     if agents is None:
         return "no writer is assigned to this key", True
     if len(agents) == 1:
@@ -322,7 +398,9 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
         if not isinstance(agent, str) or agent not in agents:
             return "agent must be one of " + ", ".join(agents), True
         writer = agent
-    schema = _PEN_SCHEMAS[name]
+    if name == "journal_history" and not history:
+        return "history is not offered", True
+    schema = {t["name"]: t["inputSchema"] for t in _journal_tools(history)}[name]
     properties = schema["properties"]
     if set(args) - properties.keys():
         return "unknown argument", True
@@ -336,7 +414,8 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
             return f"invalid {argument}", True
     args = dict(args)
     owner = writer
-    if name in _PEN_READS:
+    method_name, is_read = JOURNAL_METHODS[name]
+    if is_read:
         owner = args.pop("of", writer)
         if owner != writer:
             configured, silo, reads = policy or Config.policy
@@ -345,22 +424,43 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
             if reads.get(writer) == "own":
                 return "this agent can only read its own notebooks", True
             args["visible"] = lambda collection, default: pooled(silo, owner, collection, default)
-    elif name in {"pen_write", "pen_edit"}:
+    elif name in ("journal_write", "journal_edit"):
         args["surface"] = surface
     if not _one_write.acquire(blocking=False):
         return "another write is running; try again when it finishes", True
     try:
-        method = getattr(Config.pen if store is None else store, name[4:])
+        pen = Config.pen if store is None else store
+        if "fields" in args or name == "journal_write":
+            from engine.pen import check_fields
+            journal = args.get("collection") if name == "journal_write" else pen.read(owner, args["id"])["collection"]
+            declared = declared_fields(fields, owner, journal)
+            if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
+                check_fields(declared, args.get("fields", {}), name == "journal_write")
+            if not args.get("fields"):
+                args.pop("fields", None)    # stores take `fields` only when there is something to store
+        method = getattr(pen, method_name)
         result = method(owner, **args)
-        if name == "pen_write":
+        if name == "journal_write":
             result = {"id": result}
-        elif name == "pen_edit":
+        elif name == "journal_edit":
             result = {"version": result}
-        elif name == "pen_delete":
+        elif name == "journal_delete":
             result = {"ok": True}
+        elif name == "journals":
+            result = _with_declared_fields(result, fields, owner, owner == writer)
+        elif name == "journal_history":
+            result = [_older(r, result[i + 1]) if i + 1 < len(result) else r for i, r in enumerate(result)]
+        elif name == "journal_read" and args.get("version"):
+            try:
+                result = _older(result, method(owner, args["id"], args["version"] + 1,
+                                               **({"visible": args["visible"]} if "visible" in args else {})))
+            except ValueError as e:
+                if str(e) != 'version not found':
+                    raise    # a damaged newer version is an error, never passed off as 'current'
+                # no newer version: this one is current
         return json.dumps(result, ensure_ascii=False), False
     except OSError as e:
-        if store is not None and name not in _PEN_READS:
+        if store is not None and not is_read:
             # Cloud writes share a transaction with the retry record. Let it roll back.
             raise
         return str(e), True
@@ -370,7 +470,36 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None):
         _one_write.release()
 
 
-def handle(msg, writer=None, *, surface=None, policy=None, store=None):
+def _with_declared_fields(journals, fields, owner, own):
+    """`journals` answer: each journal with the fields it declares; an own journal not yet written to is listed too."""
+    result = []
+    for entry in journals:
+        declared = declared_fields(fields, owner, entry["collection"])
+        result.append(dict(entry, fields=declared) if declared else entry)
+    if own:
+        known = {entry["collection"] for entry in journals}
+        named = {**fields.get("*", {}), **fields.get(owner, {})}
+        for journal in sorted(named):
+            declared = declared_fields(fields, owner, journal)
+            if journal != "*" and journal not in known and declared:
+                result.append({"collection": journal, "count": 0, "fields": declared})
+    return result
+
+
+def _listed_pen_tools(agents, history):
+    if agents and len(agents) > 1:
+        return Config.shared_tools.get((agents, history)) or _shared_pen_tools(agents, history)
+    return _journal_tools(history)
+
+
+def _callable_names(history):
+    """Every name tools/call accepts: the chat tools, the journal tools (journal_history only when history is on)
+    and the old pen_* names as unlisted aliases of them."""
+    journal = {t["name"] for t in _journal_tools(history)}
+    return {t["name"] for t in TOOLS} | journal | {old for old, new in PEN_ALIASES.items() if new in journal}
+
+
+def handle(msg, writer=None, *, surface=None, policy=None, store=None, fields=None, history=None):
     """One JSON-RPC message -> its response dict, or None for a notification.
 
     `writer` is what the key is bound to: None, one agent name, or a tuple of agent names."""
@@ -390,17 +519,17 @@ def handle(msg, writer=None, *, surface=None, policy=None, store=None):
     if method == "ping":
         return _result(rid, {})
     if method == "tools/list":
-        pen = (Config.shared_tools.get(agents) or _shared_pen_tools(agents)) if agents and len(agents) > 1 else Config.pen_tools
-        return _result(rid, {"tools": TOOLS + pen})
+        return _result(rid, {"tools": TOOLS + _listed_pen_tools(agents, Config.history if history is None else history)})
     if method == "tools/call":
         name = params.get("name")
-        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS + Config.pen_tools}:
+        if not isinstance(name, str) or name not in _callable_names(Config.history if history is None else history):
             return _error(rid, -32602, f"unknown tool: {name}")
         args = params["arguments"] if "arguments" in params else {}
         if not isinstance(args, dict):
             return _error(rid, -32602, "arguments must be an object")
-        text, is_error = (pen_tool(name, args, agents, surface=surface, policy=policy, store=store)
-                          if name in _PEN_SCHEMAS else run_tool(name, args))
+        text, is_error = (pen_tool(name, args, agents, surface=surface, policy=policy, store=store,
+                                   fields=fields, history=history)
+                          if name in JOURNAL_METHODS or name in PEN_ALIASES else run_tool(name, args))
         return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
     return _error(rid, -32601, f"method not found: {method}")
 
@@ -514,16 +643,17 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
     if "SCRIPTORIUM_MCP_KEY" not in references and key not in references.values():
         references["SCRIPTORIUM_MCP_KEY"] = key
     try:
-        Config.policy, Config.surfaces = pen_settings(os.environ.get, writer_names.values(), references)
+        Config.policy, Config.surfaces, Config.fields, Config.history = pen_settings(os.environ.get, writer_names.values(), references)
     except ValueError as e:
         raise SystemExit(str(e)) from e
-    Config.shared_tools = {v: _shared_pen_tools(v) for v in Config.keys.values() if v is not None and len(v) > 1}
+    Config.shared_tools = {(v, Config.history): _shared_pen_tools(v, Config.history)
+                           for v in Config.keys.values() if v is not None and len(v) > 1}
     if pen_ref:
         mod, sep, attr = pen_ref.partition(":")
         if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
         try:
             store = getattr(importlib.import_module(mod), attr)
-            methods = [tool["name"][4:] for tool in PEN_TOOLS]
+            methods = list(STORE_METHODS)
             if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in methods)):
                 store = store()
 
@@ -531,13 +661,15 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
                 method = getattr(store, name, None)
                 if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, name):
                     raise ValueError(f"pen store lacks required method: {name}")
-            if getattr(store, "contract_version", None) != PEN_CONTRACT_VERSION:
+            version = getattr(store, "contract_version", None)
+            if version not in (2, PEN_CONTRACT_VERSION):
                 raise ValueError(f"pen store must declare contract_version = {PEN_CONTRACT_VERSION}")
-            Config.pen_tools = PEN_TOOLS
+            if version < PEN_CONTRACT_VERSION and any(Config.fields.values()):
+                raise ValueError(f"{FIELDS_ENV} needs a pen store that declares contract_version = {PEN_CONTRACT_VERSION}; "
+                                 f"this one declares {version}")
             Config.pen = store
         except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))
     else:
-        Config.pen_tools = PEN_TOOLS
         try: Config.pen = LocalFilesPenStore(real, timezone)
         except (ValueError, KeyError) as e: raise SystemExit("invalid pen timezone: " + str(e))
 

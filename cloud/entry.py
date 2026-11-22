@@ -27,7 +27,7 @@ RETRY_TTL = 24 * 60 * 60
 PEN_NAMES = {tool["name"] for tool in server.PEN_TOOLS}
 CHAT_NAMES = {tool["name"] for tool in server.TOOLS}
 MAX_REQUEST_ID = 200
-WRITE_NAMES = ("pen_write", "pen_edit", "pen_delete")
+WRITE_NAMES = ("journal_write", "journal_edit", "journal_delete", "pen_write", "pen_edit", "pen_delete")
 PEN_OBJECT = "pen"    # the one Durable Object of this deployment; keys only admit a request and name its agents
 MAX_SAVED = 1_000_000    # bytes of one answer kept for a retry; a Durable Object row holds at most 2 MB
 _REQUESTS = ("CREATE TABLE IF NOT EXISTS cloud_requests (rid TEXT PRIMARY KEY, writer TEXT NOT NULL, hash TEXT NOT NULL, "
@@ -78,11 +78,11 @@ def load_keys(env_get, *, with_policy=False):
     if KEY_ENV not in references and key not in references.values():
         references[KEY_ENV] = key
     try:
-        policy, surfaces = server.pen_settings(env_get, folded.values(), references)
+        policy, surfaces, fields, history = server.pen_settings(env_get, folded.values(), references)
     except ValueError as e:
         return {}, str(e)
     if with_policy:
-        keys = {secret: (agents, surfaces.get(secret), policy) for secret, agents in keys.items()}
+        keys = {secret: (agents, surfaces.get(secret), policy, fields, history) for secret, agents in keys.items()}
     return keys, None
 
 
@@ -123,7 +123,7 @@ def cloud_handle(msg, agents, **context):
         return _error(msg["id"], -32602, f"unknown tool: {params['name']}")
     answer = server.handle(msg, agents, **context)
     if method == "tools/list" and isinstance(answer, dict) and "result" in answer:
-        answer["result"]["tools"] = [t for t in answer["result"]["tools"] if t["name"] in PEN_NAMES]
+        answer["result"]["tools"] = [t for t in answer["result"]["tools"] if t["name"] not in CHAT_NAMES]
     return answer
 
 
@@ -156,7 +156,7 @@ def _request_rpc_id(body_text):
         return None
 
 
-def serve(store, body_text, agents, request_id="", *, surface=None, policy=None):
+def serve(store, body_text, agents, request_id="", *, surface=None, policy=None, fields=None, history=False):
     """Handle an admitted request, committing each retryable write and its reply together."""
     size = len(body_text.encode("utf-8"))
     if size > server.MAX_BODY:
@@ -169,7 +169,8 @@ def serve(store, body_text, agents, request_id="", *, surface=None, policy=None)
         return 400, json.dumps(_error(None, -32700, "parse error"))
     if isinstance(body, list):
         return 400, json.dumps(_error(None, -32600, "batches are not supported"))
-    context = dict(store=store, surface=surface, policy=policy or (frozenset(agents or ()), {}, {}))
+    context = dict(store=store, surface=surface, policy=policy or (frozenset(agents or ()), {}, {}),
+                   fields=fields or {}, history=bool(history))
     params = _write_call(body)
     if params is None:
         return _reply(cloud_handle(body, agents, **context))
@@ -225,10 +226,11 @@ class PenObject(DurableObject):
         self.store = SqlPenStore(DurableObjectSql(ctx.storage.sql, ctx.storage), str(tz) if tz else None)
 
     async def call(self, body, context_json, request_id):
-        agents, surface, policy = json.loads(context_json)
+        agents, surface, policy, fields, history = json.loads(context_json)
         agents = tuple(agents) if agents else None
         try:
-            status, text = serve(self.store, body, agents, request_id, surface=surface, policy=policy)
+            status, text = serve(self.store, body, agents, request_id, surface=surface, policy=policy,
+                                 fields=fields, history=history)
         except Exception:
             status, text = 500, json.dumps(_error(_request_rpc_id(body), -32603, "the pen could not answer"))
         return json.dumps({"status": status, "text": text})
@@ -247,8 +249,8 @@ class Default(WorkerEntrypoint):
             return Response(None, status=401, headers={"www-authenticate": "Bearer"})
         if refused:
             return _plain(refused, found)
-        agents, surface, (configured, silo, reads) = found
-        context = json.dumps([agents, surface, [sorted(configured), silo, reads]])
+        agents, surface, (configured, silo, reads), fields, history = found
+        context = json.dumps([agents, surface, [sorted(configured), silo, reads], fields, history])
         body = await request.text()
         stub = self.env.PEN.getByName(PEN_OBJECT)
         out = json.loads(await stub.call(body, context,

@@ -231,7 +231,7 @@ class ServeTests(unittest.TestCase):
         _, response = self.serve(json.dumps(rpc('tools/list')))
         names = {t['name'] for t in response['result']['tools']}
         self.assertEqual(names, entry.PEN_NAMES)
-        self.assertEqual(len(names), 7)
+        self.assertEqual(len(names), 6)
         _, response = self.serve(json.dumps(rpc('tools/list')), agents=('beta', 'gamma'))
         self.assertEqual({t['name'] for t in response['result']['tools']}, entry.PEN_NAMES)
         self.assertTrue(all('agent' in t['inputSchema']['properties'] for t in response['result']['tools']))
@@ -509,6 +509,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
                                                         'SHARED': ['alpha', 'beta']})
         self.worker.env.SCRIPTORIUM_SURFACES = json.dumps({'A': 'desktop', 'SHARED': 'web'})
         self.worker.env.SCRIPTORIUM_SILO = json.dumps({'*': {'*': 'pool'}, 'beta': {'hidden': 'silo'}})
+        self.worker.env.SCRIPTORIUM_HISTORY = 'on'
 
         async def tool(name, args, key=A_KEY, request_id=None):
             answer = await self.fetch(call(name, args), key=key, request_id=request_id)

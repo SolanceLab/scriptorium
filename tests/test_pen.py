@@ -60,6 +60,7 @@ class PenTests(unittest.TestCase):
         self.assertFalse(error, result)
         return json.loads(result)
 
+    @mock.patch.object(server.Config, 'history', True)
     def test_tools_and_versions(self):
         writer = 'alpha'
         id = self.success(writer, 'pen_write', collection='daily', body='First', by_day=True)['id']
@@ -214,7 +215,7 @@ class PenTests(unittest.TestCase):
             with mock.patch.object(pen_module, 'load_store', side_effect=[target, legacy]):
                 with self.assertRaises(SystemExit):
                     main(self.transfer_args(dest, 'alpha'))
-            self.assertIn('destination must declare contract_version = 2', stderr.getvalue())
+            self.assertIn('destination must declare contract_version = 3', stderr.getvalue())
             legacy.import_pen.assert_not_called()
 
     def test_transfer_accepts_different_entry_order(self):
@@ -267,6 +268,7 @@ class PenTests(unittest.TestCase):
                     self.assertEqual(files(), before)
                     self.assertFalse(list(root.rglob('.pen-*')))
 
+    @mock.patch.object(server.Config, 'history', True)
     def test_http_binds_each_key(self):
         http_server = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         thread = threading.Thread(target=http_server.serve_forever, daemon=True)
@@ -296,7 +298,7 @@ class PenTests(unittest.TestCase):
             ('pen_history', {'id': id}),
             ('pen_delete', {'id': id}),
         ]
-        self.assertEqual({name for name, _ in cases}, {tool['name'] for tool in server.PEN_TOOLS})
+        self.assertEqual({server.PEN_ALIASES[name] for name, _ in cases}, {tool['name'] for tool in server._journal_tools(True)})
         for name, args in cases:
             with self.subTest(tool=name):
                 spoofed = call(a_key, name, dict(args, writer='beta'))
@@ -438,7 +440,7 @@ class PenTests(unittest.TestCase):
         module.store = self.store
         with mock.patch.dict(sys.modules, {'pen_fixture': module}):
             with mock.patch.object(self.store, 'contract_version', 1):
-                with self.assertRaisesRegex(SystemExit, 'contract_version = 2'):
+                with self.assertRaisesRegex(SystemExit, 'contract_version = 3'):
                     server.configure(self.tmp.name, 'c' * 32, {}, 'pen_fixture:store')
 
     def test_incomplete_custom_store_refused(self):

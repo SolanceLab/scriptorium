@@ -12,7 +12,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from engine.pen import (PEN_CONTRACT_VERSION, LocalFilesPenStore, PenStore,
-                        snapshot_parts, stamp_surface, validate_writer)
+                        snapshot_parts, stamp_surface, stored_fields, validate_writer)
 
 _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS pen_versions ("
@@ -116,6 +116,7 @@ class SqlPenStore(PenStore):
     _valid_id = staticmethod(LocalFilesPenStore._valid_id)
     _fields = staticmethod(LocalFilesPenStore._fields)
     _validate_record = LocalFilesPenStore._validate_record
+    _merge_fields = staticmethod(LocalFilesPenStore._merge_fields)
     _name_key = staticmethod(LocalFilesPenStore._name_key)
 
     def __init__(self, adapter, timezone=None, clock=None):
@@ -224,11 +225,13 @@ class SqlPenStore(PenStore):
 
         return self._atomic(read) if visible is not None else read()
 
-    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None):
-        return self._atomic(lambda: self._write(writer, collection, body, title, pinned, by_day, surface))
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+        return self._atomic(lambda: self._write(writer, collection, body, title, pinned, by_day, surface, fields))
 
-    def _write(self, writer, collection, body, title, pinned, by_day, surface):
+    def _write(self, writer, collection, body, title, pinned, by_day, surface, fields):
         self._fields(body, title, pinned)
+        if fields is not None:
+            stored_fields(fields)
         if by_day is not None and type(by_day) is not bool:
             raise ValueError('by_day must be a boolean')
         self._text(body, title)
@@ -244,14 +247,18 @@ class SqlPenStore(PenStore):
         if title is not None:
             record['title'] = title
         stamp_surface(record, surface)
+        if fields:
+            record['fields'] = fields
         if mode is None:
             self._run("INSERT OR IGNORE INTO pen_collections VALUES (?, ?, 'pool')", (writer, collection))
         self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   self._row(record))
         return id
 
-    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None):
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)
+        if fields is not None and not isinstance(fields, dict):
+            raise ValueError('invalid entry fields')
         if type(based_on) is not int or based_on < 1:
             raise ValueError('invalid based_on')
         validate_writer(writer)
@@ -269,6 +276,8 @@ class SqlPenStore(PenStore):
             record['pinned'] = pinned
         record.update(version=latest['version'] + 1, edited=self._now())
         stamp_surface(record, surface)
+        if fields:
+            self._merge_fields(record, fields)
         # One statement: appends only while the version we read is still the newest one (the atomic base check).
         done = self._run(
             f"INSERT INTO pen_versions ({_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
