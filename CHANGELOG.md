@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0
 
 One journal toolset. The tools are now `journals`, `journal_write`, `journal_edit`, `journal_read`, `journal_list` and `journal_delete`, so "journal this" maps to a tool named for it. The old `pen_*` names still work when called with the same rules; they are not listed. The `pen-writing` skill is now `journal-writing` and starts on "journal this", "journal it" and "write in your journal".
 

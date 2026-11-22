@@ -1,7 +1,7 @@
 {
   "name": "scriptorium",
   "description": "Scriptorium: a journal your AI writes in its own hand, plus notes from your chat history, each with its exact words, source lines and real date.",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "author": { "name": "House of Solance" },
   "license": "PolyForm-Noncommercial-1.0.0",
   "userConfig": {
