@@ -399,6 +399,327 @@ class CloudParityTests(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertEqual(len(self.store.export_pen('alpha')), 1)
 
+    def test_append_retry_with_x_request_id_adds_once(self):
+        context = dict(fields=self.fields, history=True, surface='web')
+        # First append creates today's entry; retry replays without duplicating.
+        req1 = json.dumps(rpc('journal_write', {
+            'collection': 'journal', 'body': 'morning', 'append': True, 'fields': {'mood': 4, 'emotions': ['calm']}}, ))
+        first = entry.serve(self.store, req1, self.agents, 'app-1', **context)
+        replay = entry.serve(self.store, req1, self.agents, 'app-1', **context)
+        self.assertEqual(first, replay)
+        created = json.loads(json.loads(first[1])['result']['content'][0]['text'])
+        self.assertEqual(created['action'], 'created')
+        self.assertEqual(created['version'], 1)
+        self.assertEqual(self.store.read('alpha', created['id'])['body'], 'morning')
+        self.assertEqual(self.store.read('alpha', created['id'])['surface'], 'web')
+
+        # Second append adds to today's entry; retry with same X-Request-Id must NOT add the text twice.
+        req2 = json.dumps(rpc('journal_write', {
+            'collection': 'journal', 'body': 'afternoon', 'append': True, 'fields': {'emotions': ['calm', 'bright']}}))
+        second = entry.serve(self.store, req2, self.agents, 'app-2', **context)
+        replay2 = entry.serve(self.store, req2, self.agents, 'app-2', **context)
+        self.assertEqual(second, replay2)
+        appended = json.loads(json.loads(second[1])['result']['content'][0]['text'])
+        self.assertEqual(appended, {'id': created['id'], 'version': 2, 'action': 'appended'})
+        rec = self.store.read('alpha', created['id'])
+        self.assertEqual(rec['body'], 'morning\n\nafternoon')
+        self.assertEqual(rec['fields'], {'mood': 4, 'emotions': ['calm', 'bright']})
+        # Different body with same X-Request-Id conflicts with 409.
+        conflict = entry.serve(self.store, json.dumps(rpc('journal_write', {
+            'collection': 'journal', 'body': 'different', 'append': True})), self.agents, 'app-2', **context)
+        self.assertEqual(conflict[0], 409)
+
+
+class AppendTests(Base):
+    def test_append_creates_today_and_appends_via_mcp(self):
+        self.configure()
+        # Use a deterministic clock + timezone on the local store.
+        import datetime as dt
+        now = [dt.datetime(2026, 11, 22, 18, 0, tzinfo=dt.timezone.utc)]    # 2026-11-23 01:00+07:00
+        server.Config.pen = LocalFilesPenStore(self.tmp.name, 'Asia/Jakarta', lambda: now[0])
+
+        first = self.ok('journal_write', {'collection': 'daily', 'body': 'first note', 'append': True})
+        self.assertEqual(first['action'], 'created')
+        self.assertEqual(first['version'], 1)
+        rec1 = self.ok('journal_read', {'id': first['id']})
+        self.assertEqual(rec1['title'], '2026-11-23')
+        self.assertEqual(rec1['body'], 'first note')
+
+        now[0] = dt.datetime(2026, 11, 23, 3, 0, tzinfo=dt.timezone.utc)    # still 2026-11-23 in Asia/Jakarta
+        second = self.ok('pen_write', {'collection': 'daily', 'body': 'second note', 'append': True})
+        self.assertEqual(second, {'id': first['id'], 'version': 2, 'action': 'appended'})
+        self.assertEqual(self.ok('journal_read', {'id': first['id']})['body'], 'first note\n\nsecond note')
+
+    def test_append_by_id_and_refusals(self):
+        self.configure()
+        flat_id = self.ok('journal_write', {'collection': 'notes', 'body': 'base', 'title': 'Note'})['id']
+        # Refused on non-by-day journal without id.
+        err, msg = self.tool('journal_write', {'collection': 'notes', 'body': 'nope', 'append': True})
+        self.assertTrue(err)
+        self.assertIn('by_day', msg)
+        # Works with id on flat journal.
+        res = self.ok('journal_write', {'collection': 'notes', 'body': 'added', 'append': True, 'id': flat_id})
+        self.assertEqual(res, {'id': flat_id, 'version': 2, 'action': 'appended'})
+        self.assertEqual(self.ok('journal_read', {'id': flat_id})['body'], 'base\n\nadded')
+        # Invalid option combinations are refused.
+        self.assertTrue(self.tool('journal_write', {'collection': 'notes', 'body': 'x', 'id': flat_id})[0])
+        self.assertTrue(self.tool('journal_write', {'collection': 'notes', 'body': 'x', 'append': True, 'pinned': True})[0])
+        self.assertTrue(self.tool('journal_write', {'collection': 'daily', 'body': 'x', 'append': True, 'by_day': False})[0])
+
+    def test_append_merges_declared_fields_and_stamps_surface(self):
+        self.configure({'SCRIPTORIUM_FIELDS': json.dumps(ONE_AGENT_FIELDS)})
+        # Stamp surface via handle(..., surface=...).
+        def call_surface(args, surface):
+            answer = server.handle(rpc('journal_write', args), ('alpha',), surface=surface)
+            res = answer['result']
+            text = res['content'][0]['text']
+            return res['isError'], text if res['isError'] else json.loads(text)
+
+        err, created = call_surface({
+            'collection': 'journal', 'body': 'one', 'append': True,
+            'fields': {'mood': 3, 'emotions': ['calm'], 'markers': {'a': 1}, 'keynotes': 'k1', 'seen': False},
+        }, 'desktop')
+        self.assertFalse(err, created)
+        self.assertEqual(self.ok('journal_read', {'id': created['id']})['surface'], 'desktop')
+
+        err, appended = call_surface({
+            'collection': 'journal', 'body': 'two', 'append': True,
+            'fields': {'emotions': ['calm', 'focused'], 'markers': {'b': 2}, 'seen': True},
+        }, 'mobile')
+        self.assertFalse(err, appended)
+        self.assertEqual(appended, {'id': created['id'], 'version': 2, 'action': 'appended'})
+        rec = self.ok('journal_read', {'id': created['id']})
+        self.assertEqual(rec['surface'], 'mobile')
+        self.assertEqual(rec['fields'], {
+            'mood': 3, 'emotions': ['calm', 'focused'], 'markers': {'a': 1, 'b': 2}, 'keynotes': 'k1', 'seen': True,
+        })
+        # Undeclared field and null field are refused on append.
+        self.assertTrue(call_surface({'collection': 'journal', 'body': 'bad', 'append': True, 'fields': {'nope': 1}}, None)[0])
+        self.assertTrue(call_surface({'collection': 'journal', 'body': 'bad', 'append': True, 'fields': {'keynotes': None}}, None)[0])
+
+    def test_append_enforces_required_fields_only_on_create(self):
+        self.configure({'SCRIPTORIUM_FIELDS': json.dumps(ONE_AGENT_FIELDS)})
+        # Creating today's entry via append without fields or without required `mood` is refused and creates nothing.
+        err, msg = self.tool('journal_write', {'collection': 'journal', 'body': 'no fields', 'append': True})
+        self.assertTrue(err)
+        self.assertIn('missing required fields: mood', msg)
+        err, msg = self.tool('journal_write', {
+            'collection': 'journal', 'body': 'partial', 'append': True, 'fields': {'emotions': ['calm']},
+        })
+        self.assertTrue(err)
+        self.assertIn('missing required fields: mood', msg)
+        self.assertEqual(self.ok('journal_list', {'collection': 'journal'}), [])
+
+        # Creating with required `mood` succeeds; subsequent appends allow partial or omitted fields.
+        created = self.ok('journal_write', {
+            'collection': 'journal', 'body': 'first', 'append': True, 'fields': {'mood': 4},
+        })
+        self.assertEqual(created['action'], 'created')
+        appended_partial = self.ok('journal_write', {
+            'collection': 'journal', 'body': 'second', 'append': True, 'fields': {'emotions': ['steady']},
+        })
+        self.assertEqual(appended_partial, {'id': created['id'], 'version': 2, 'action': 'appended'})
+        appended_none = self.ok('journal_write', {'collection': 'journal', 'body': 'third', 'append': True})
+        self.assertEqual(appended_none, {'id': created['id'], 'version': 3, 'action': 'appended'})
+        appended_by_id = self.ok('journal_write', {
+            'collection': 'journal', 'body': 'fourth', 'append': True, 'id': created['id'],
+        })
+        self.assertEqual(appended_by_id, {'id': created['id'], 'version': 4, 'action': 'appended'})
+        rec = self.ok('journal_read', {'id': created['id']})
+        self.assertEqual(rec['fields'], {'mood': 4, 'emotions': ['steady']})
+
+        # Async path enforces the same rule on SqlPenStore.
+        import asyncio
+        connection = sqlite3.connect(':memory:')
+        self.addCleanup(connection.close)
+        sql_store = SqlPenStore(Sqlite3Sql(connection))
+        parsed_fields = server.Config.fields
+        text, is_err = asyncio.run(server.pen_tool_async(
+            'journal_write', {'collection': 'journal', 'body': 'missing', 'append': True},
+            ('alpha',), store=sql_store, fields=parsed_fields))
+        self.assertTrue(is_err)
+        self.assertIn('missing required fields: mood', text)
+        self.assertEqual(sql_store.list('alpha', 'journal'), [])
+        text, is_err = asyncio.run(server.pen_tool_async(
+            'journal_write', {'collection': 'journal', 'body': 'ok', 'append': True, 'fields': {'mood': 5}},
+            ('alpha',), store=sql_store, fields=parsed_fields))
+        self.assertFalse(is_err, text)
+        text, is_err = asyncio.run(server.pen_tool_async(
+            'journal_write', {'collection': 'journal', 'body': 'more', 'append': True},
+            ('alpha',), store=sql_store, fields=parsed_fields))
+        self.assertFalse(is_err, text)
+        self.assertEqual(json.loads(text)['action'], 'appended')
+
+    def test_custom_store_without_append_refuses_and_never_emulates(self):
+        edit_calls = []
+
+        class NoAppendStore:
+            contract_version = 3
+            def collections(self, writer, *, visible=None): return []
+            def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+                return 'a' * 32
+            def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
+                edit_calls.append(id)
+                return 2
+            def read(self, writer, id, version=None, *, visible=None): raise ValueError('entry not found')
+            def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): return []
+            def history(self, writer, id, *, visible=None): raise ValueError('entry not found')
+            def delete(self, writer, id): return None
+
+        module = type(sys)('no_append_fixture')
+        module.store = NoAppendStore()
+        with mock.patch.dict(sys.modules, {'no_append_fixture': module}):
+            self.configure(pen_ref='no_append_fixture:store')
+            self.assertEqual(self.ok('journal_write', {'collection': 'journal', 'body': 'ok'}), {'id': 'a' * 32})
+            err, msg = self.tool('journal_write', {'collection': 'journal', 'body': 'nope', 'append': True})
+            self.assertTrue(err)
+            self.assertIn('does not support append', msg)
+            self.assertEqual(edit_calls, [])
+
+    def test_current_entry_only_store_replaces_on_append(self):
+        backing = {}
+
+        class CurrentOnlyWithAppend:
+            contract_version = 3
+            keeps_history = False
+            def collections(self, writer, *, visible=None): return []
+            def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+                eid = 'b' * 32
+                backing[(writer, eid)] = {'id': eid, 'collection': collection, 'writer': writer, 'body': body,
+                                          'version': 1, 'by_day': bool(by_day), 'pinned': pinned}
+                return eid
+            def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+                target = backing.get((writer, id)) if id else next(
+                    (r for (w, _), r in backing.items() if w == writer and r['collection'] == collection), None)
+                if target is None:
+                    if on_create is not None:
+                        on_create()
+                    eid = 'c' * 32
+                    backing[(writer, eid)] = {'id': eid, 'collection': collection, 'writer': writer, 'body': body,
+                                              'title': title or (day or '2026-11-22'), 'version': 1, 'by_day': True,
+                                              'pinned': False}
+                    if surface is not None:
+                        backing[(writer, eid)]['surface'] = surface
+                    return {'id': eid, 'version': 1, 'action': 'created'}
+                target['body'] = pen_module.append_body(target['body'], body)
+                target['version'] += 1
+                if surface is not None:
+                    target['surface'] = surface
+                return {'id': target['id'], 'version': target['version'], 'action': 'appended'}
+            def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): return 2
+            def read(self, writer, id, version=None, *, visible=None):
+                if (writer, id) not in backing:
+                    raise ValueError('entry not found')
+                return dict(backing[(writer, id)])
+            def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): return []
+            def delete(self, writer, id): backing.pop((writer, id), None)
+
+        module = type(sys)('current_only_append')
+        module.store = CurrentOnlyWithAppend()
+        with mock.patch.dict(sys.modules, {'current_only_append': module}):
+            self.configure(pen_ref='current_only_append:store')
+            r1 = self.ok('journal_write', {'collection': 'daily', 'body': 'one', 'append': True})
+            r2 = self.ok('journal_write', {'collection': 'daily', 'body': 'two', 'append': True})
+            self.assertEqual(r1['action'], 'created')
+            self.assertEqual(r2, {'id': r1['id'], 'version': 2, 'action': 'appended'})
+            self.assertEqual(len(backing), 1)
+            self.assertEqual(self.ok('journal_read', {'id': r1['id']})['body'], 'one\n\ntwo')
+
+    def test_custom_store_append_on_create_contract_and_kwargs_guard(self):
+        # Case 1: Custom store following the documented append(..., on_create=None) contract.
+        backing = {}
+        on_create_calls = []
+
+        class DocumentedAppendStore:
+            contract_version = 3
+            def collections(self, writer, *, visible=None): return []
+            def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+                return '1' * 32
+            def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+                target = backing.get((writer, id)) if id else next(
+                    (r for (w, _), r in backing.items() if w == writer and r['collection'] == collection), None)
+                if target is None:
+                    if on_create is not None:
+                        on_create_calls.append(True)
+                        on_create()
+                    eid = '2' * 32
+                    rec = {'id': eid, 'collection': collection, 'writer': writer, 'body': body,
+                           'title': title or (day or '2026-11-22'), 'version': 1, 'by_day': True, 'pinned': False}
+                    if fields:
+                        rec['fields'] = dict(fields)
+                    backing[(writer, eid)] = rec
+                    return {'id': eid, 'version': 1, 'action': 'created'}
+                target['body'] = pen_module.append_body(target['body'], body)
+                target['version'] += 1
+                if fields:
+                    target['fields'] = pen_module.append_fields(target.get('fields'), fields)
+                return {'id': target['id'], 'version': target['version'], 'action': 'appended'}
+            def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): return 2
+            def read(self, writer, id, version=None, *, visible=None):
+                if (writer, id) not in backing:
+                    raise ValueError('entry not found')
+                return dict(backing[(writer, id)])
+            def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): return []
+            def history(self, writer, id, *, visible=None): raise ValueError('entry not found')
+            def delete(self, writer, id): backing.pop((writer, id), None)
+
+        mod1 = type(sys)('doc_append_store')
+        mod1.store = DocumentedAppendStore()
+        with mock.patch.dict(sys.modules, {'doc_append_store': mod1}):
+            self.configure({'SCRIPTORIUM_FIELDS': json.dumps(ONE_AGENT_FIELDS)}, pen_ref='doc_append_store:store')
+            # Creating without required `mood` invokes on_create inside the store and inserts nothing.
+            err, msg = self.tool('journal_write', {'collection': 'journal', 'body': 'first', 'append': True})
+            self.assertTrue(err)
+            self.assertIn('missing required fields: mood', msg)
+            self.assertEqual(len(on_create_calls), 1)
+            self.assertEqual(backing, {})
+            # Creating with required `mood` succeeds; a body-only append to the existing entry succeeds without on_create.
+            created = self.ok('journal_write', {
+                'collection': 'journal', 'body': 'first', 'append': True, 'fields': {'mood': 4},
+            })
+            self.assertEqual(created['action'], 'created')
+            appended = self.ok('journal_write', {'collection': 'journal', 'body': 'second', 'append': True})
+            self.assertEqual(appended, {'id': created['id'], 'version': 2, 'action': 'appended'})
+            self.assertEqual(len(on_create_calls), 1)
+            rec = self.ok('journal_read', {'id': created['id']})
+            self.assertEqual(rec['body'], 'first\n\nsecond')
+            self.assertEqual(rec['fields'], {'mood': 4})
+
+        # Case 2: Custom store taking **kwargs and ignoring on_create must NOT create an entry without required fields.
+        kwargs_backing = {}
+        kwargs_calls = []
+
+        class KwargsIgnoringAppendStore(DocumentedAppendStore):
+            def append(self, writer, collection, body, **kwargs):
+                kwargs_calls.append(kwargs)
+                eid = '3' * 32
+                kwargs_backing[(writer, eid)] = {'id': eid, 'collection': collection, 'writer': writer, 'body': body,
+                                                 'version': 1, 'by_day': True, 'pinned': False}
+                return {'id': eid, 'version': 1, 'action': 'created'}
+
+        mod2 = type(sys)('kwargs_append_store')
+        mod2.store = KwargsIgnoringAppendStore()
+        with mock.patch.dict(sys.modules, {'kwargs_append_store': mod2}):
+            self.configure({'SCRIPTORIUM_FIELDS': json.dumps(ONE_AGENT_FIELDS)}, pen_ref='kwargs_append_store:store')
+            err, msg = self.tool('journal_write', {'collection': 'journal', 'body': 'no mood', 'append': True})
+            self.assertTrue(err)
+            self.assertIn('missing required fields: mood', msg)
+            self.assertEqual(kwargs_calls, [])
+            self.assertEqual(kwargs_backing, {})
+
+        # Case 3: Custom store declaring on_create=None explicitly but ignoring it on create fails loudly.
+        class BuggyExplicitOnCreateStore(DocumentedAppendStore):
+            def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+                return {'id': '4' * 32, 'version': 1, 'action': 'created'}
+
+        mod3 = type(sys)('buggy_on_create_store')
+        mod3.store = BuggyExplicitOnCreateStore()
+        with mock.patch.dict(sys.modules, {'buggy_on_create_store': mod3}):
+            self.configure({'SCRIPTORIUM_FIELDS': json.dumps(ONE_AGENT_FIELDS)}, pen_ref='buggy_on_create_store:store')
+            err, msg = self.tool('journal_write', {'collection': 'journal', 'body': 'no mood', 'append': True})
+            self.assertTrue(err)
+            self.assertIn('on_create', msg)
+
 
 class SharedStoreRulesTests(unittest.TestCase):
     def test_check_fields_rules_directly(self):

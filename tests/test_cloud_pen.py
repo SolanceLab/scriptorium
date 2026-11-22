@@ -210,6 +210,83 @@ class Contract:
         id = self.store.write('alpha', 'notes', body)
         self.assertEqual(self.store.read('alpha', id)['body'], body)
 
+    def test_append_creates_today_and_appends_to_it(self):
+        # 2026-01-01 18:00 UTC is 2026-01-02 01:00+07:00 in Asia/Jakarta.
+        first = self.store.append('alpha', 'daily', 'morning note', surface='desktop')
+        self.assertEqual(first['action'], 'created')
+        self.assertEqual(first['version'], 1)
+        self.assertRegex(first['id'], r'^[0-9a-f]{32}$')
+        rec1 = self.store.read('alpha', first['id'])
+        self.assertEqual(rec1['title'], '2026-01-02')
+        self.assertEqual(rec1['body'], 'morning note')
+        self.assertEqual(rec1['surface'], 'desktop')
+        self.assertTrue(rec1['by_day'])
+
+        self.clock.set(2026, 1, 2, 3)    # still 2026-01-02 in Asia/Jakarta (10:00+07:00)
+        second = self.store.append('alpha', 'daily', 'afternoon note', surface='web')
+        self.assertEqual(second, {'id': first['id'], 'version': 2, 'action': 'appended'})
+        rec2 = self.store.read('alpha', first['id'])
+        self.assertEqual(rec2['body'], 'morning note\n\nafternoon note')
+        self.assertEqual(rec2['title'], '2026-01-02')
+        self.assertEqual(rec2['surface'], 'web')
+        self.assertEqual(rec2['created'], rec1['created'])
+        self.assertNotEqual(rec2['edited'], rec1['edited'])
+        self.assertEqual([v['version'] for v in self.store.history('alpha', first['id'])], [1, 2])
+
+        # Unlabelled append clears surface on the new version, as edit does.
+        third = self.store.append('alpha', 'daily', 'evening note')
+        self.assertEqual(third, {'id': first['id'], 'version': 3, 'action': 'appended'})
+        self.assertNotIn('surface', self.store.read('alpha', first['id']))
+
+        # Next calendar day creates a new entry (with explicit title when given).
+        self.clock.set(2026, 1, 3, 2)    # 2026-01-03 09:00+07:00
+        next_day = self.store.append('alpha', 'daily', 'new day', title='Day Three')
+        self.assertEqual(next_day['action'], 'created')
+        self.assertEqual(next_day['version'], 1)
+        self.assertNotEqual(next_day['id'], first['id'])
+        self.assertEqual(self.store.read('alpha', next_day['id'])['title'], 'Day Three')
+
+    def test_append_by_id_and_refusals(self):
+        flat_id = self.store.write('alpha', 'notes', 'start', title='Flat')
+        with self.assertRaisesRegex(ValueError, 'by_day'):
+            self.store.append('alpha', 'notes', 'cannot without id')
+        res = self.store.append('alpha', 'notes', 'more', id=flat_id, surface='mobile')
+        self.assertEqual(res, {'id': flat_id, 'version': 2, 'action': 'appended'})
+        rec = self.store.read('alpha', flat_id)
+        self.assertEqual(rec['body'], 'start\n\nmore')
+        self.assertEqual(rec['title'], 'Flat')
+        self.assertEqual(rec['surface'], 'mobile')
+        # Wrong collection, foreign writer, missing id, or both id and day are refused.
+        with self.assertRaisesRegex(ValueError, 'collection'):
+            self.store.append('alpha', 'other', 'wrong', id=flat_id)
+        with self.assertRaisesRegex(ValueError, 'entry not found'):
+            self.store.append('beta', 'notes', 'not yours', id=flat_id)
+        with self.assertRaisesRegex(ValueError, 'entry not found'):
+            self.store.append('alpha', 'notes', 'missing', id='f' * 32)
+        with self.assertRaises(ValueError):
+            self.store.append('alpha', 'notes', 'both', id=flat_id, day='2026-01-02')
+
+    def test_append_field_merge_rules(self):
+        first = self.store.append(
+            'alpha', 'daily', 'one',
+            fields={'tags': ['a', 'b'], 'meta': {'x': 1, 'y': 2}, 'note': 'keep', 'mood': 3, 'seen': False})
+        self.store.append(
+            'alpha', 'daily', 'two',
+            fields={'tags': ['b', 'c', 'a', 'd'], 'meta': {'y': 20, 'z': 30}, 'mood': 5})
+        rec = self.store.read('alpha', first['id'])
+        self.assertEqual(rec['fields'], {
+            'tags': ['a', 'b', 'c', 'd'],
+            'meta': {'x': 1, 'y': 20, 'z': 30},
+            'note': 'keep',
+            'mood': 5,
+            'seen': False,
+        })
+        self.store.append('alpha', 'daily', 'three', fields={'note': 'updated', 'seen': True})
+        rec = self.store.read('alpha', first['id'])
+        self.assertEqual(rec['fields']['note'], 'updated')
+        self.assertEqual(rec['fields']['seen'], True)
+        self.assertEqual(rec['fields']['mood'], 5)
+
     def seed(self):
         for writer in ('alpha', 'beta'):
             for day in range(1, 4):
@@ -502,6 +579,66 @@ class PoolTransferTests(unittest.TestCase):
                 self.assertCountEqual([r['id'] for r in seen], ids)
                 self.assertEqual(store.export_snapshot('alpha')['collections'], {'first': 'pool'})
 
+    def test_interleaved_appends_from_two_writers_keep_both_texts(self):
+        for sql in (False, True):
+            with self.subTest(sql=sql):
+                local = self.root / f'append_local_{sql}'
+                database = self.root / f'append_{sql}.sqlite'
+                fixed_clock = Clock(2026, 1, 2, 10)
+
+                def append_note(note):
+                    if not sql:
+                        return LocalFilesPenStore(local, 'Asia/Jakarta', fixed_clock).append('alpha', 'daily', note)
+                    connection = sqlite3.connect(database)
+                    try:
+                        return SqlPenStore(Sqlite3Sql(connection), 'Asia/Jakarta', fixed_clock).append('alpha', 'daily', note)
+                    finally:
+                        connection.close()
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(append_note, ('writer-one-note', 'writer-two-note')))
+
+                # One created version 1, the other appended version 2 on the same entry; both texts survive.
+                self.assertEqual({r['action'] for r in results}, {'created', 'appended'})
+                self.assertEqual({r['version'] for r in results}, {1, 2})
+                self.assertEqual(len({r['id'] for r in results}), 1)
+                entry_id = results[0]['id']
+
+                if sql:
+                    connection = sqlite3.connect(database)
+                    self.addCleanup(connection.close)
+                    store = SqlPenStore(Sqlite3Sql(connection), 'Asia/Jakarta', fixed_clock)
+                else:
+                    store = LocalFilesPenStore(local, 'Asia/Jakarta', fixed_clock)
+                final = store.read('alpha', entry_id)
+                self.assertEqual(final['version'], 2)
+                self.assertIn('writer-one-note', final['body'])
+                self.assertIn('writer-two-note', final['body'])
+                self.assertEqual(len(store.list('alpha', 'daily')), 1)
+
+    def test_append_to_explicit_day_creates_and_appends_on_that_day(self):
+        for sql in (False, True):
+            with self.subTest(sql=sql):
+                clock = Clock(2026, 11, 22, 10)
+                if sql:
+                    connection = sqlite3.connect(':memory:')
+                    self.addCleanup(connection.close)
+                    store = SqlPenStore(Sqlite3Sql(connection), 'Asia/Jakarta', clock)
+                else:
+                    store = LocalFilesPenStore(self.root / 'explicit_day_local', 'Asia/Jakarta', clock)
+                first = store.append('alpha', 'daily', 'first note', day='2026-11-20')
+                second = store.append('alpha', 'daily', 'second note', day='2026-11-20')
+                self.assertEqual(first['action'], 'created')
+                self.assertEqual(second, {'id': first['id'], 'version': 2, 'action': 'appended'})
+                listed_20 = store.list('alpha', 'daily', day='2026-11-20')
+                listed_22 = store.list('alpha', 'daily', day='2026-11-22')
+                self.assertEqual(len(listed_20), 1)
+                self.assertEqual(listed_20[0]['id'], first['id'])
+                self.assertEqual(listed_20[0]['body'], 'first note\n\nsecond note')
+                self.assertTrue(listed_20[0]['created'].startswith('2026-11-20'))
+                self.assertTrue(listed_20[0]['edited'].startswith('2026-11-22'))
+                self.assertEqual(listed_22, [])
+
 
 class ParityTests(unittest.TestCase):
     """The same calls into both stores give the same answers, ignoring ids and timestamps."""
@@ -528,11 +665,14 @@ class ParityTests(unittest.TestCase):
         def step(name, *args, **kwargs):
             clock.now += dt.timedelta(hours=7)
             args = [ids_by_name.get(a, a) if isinstance(a, str) and a.startswith('@') else a for a in args]
+            kwargs = {k: (ids_by_name.get(v, v) if isinstance(v, str) and v.startswith('@') else v) for k, v in kwargs.items()}
             try:
                 result = getattr(store, name)(*args, **kwargs)
                 if name == 'write':
                     ids_by_name['@' + str(len(ids_by_name))] = result
                     result = 'id'
+                elif name == 'append' and result['action'] == 'created':
+                    ids_by_name['@' + str(len(ids_by_name))] = result['id']
                 out.append(('ok', name, self.norm(result, ids)))
             except (ValueError, OSError) as error:
                 out.append(('error', name, type(error).__name__, str(error)))
@@ -543,6 +683,15 @@ class ParityTests(unittest.TestCase):
         step('write', 'alpha', 'daily', 'clash', by_day=False)
         step('write', 'beta', 'daily', 'other writer')                         # @3
         step('write', 'alpha', 'Daily', 'case clash')
+        step('append', 'alpha', 'log', 'first log', fields={'tags': ['a'], 'meta': {'k': 1}}, surface='desktop')  # @4
+        step('append', 'alpha', 'log', 'second log', fields={'tags': ['a', 'b'], 'meta': {'m': 2}}, surface='web')
+        step('append', 'alpha', 'log', 'backdated one', day='2026-01-01')                                      # @5
+        step('append', 'alpha', 'log', 'backdated two', day='2026-01-01')
+        step('list', 'alpha', 'log', day='2026-01-01')
+        step('append', 'alpha', 'notes', 'cannot without id')
+        step('append', 'alpha', 'notes', 'by id ok', id='@2', surface='mobile')
+        step('read', 'alpha', '@4')
+        step('read', 'alpha', '@2')
         step('edit', 'alpha', '@0', 1, body='one, revised')
         step('edit', 'alpha', '@0', 1, body='stale')
         step('edit', 'alpha', '@0', 2, pinned=True, title='One')

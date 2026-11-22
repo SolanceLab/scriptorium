@@ -92,10 +92,12 @@ def _value_fits(kind, value):
         return False
 
 
-def check_fields(declared, given, creating):
-    """Check the `fields` of a write (creating) or an edit against a journal's declaration (field -> field_spec).
+def check_fields(declared, given, creating, *, allow_null=None):
+    """Check the `fields` of a write (creating), an append, or an edit against a journal's declaration (field -> field_spec).
 
     A null in an edit clears an optional field; a required field is never cleared and must be present on a write."""
+    if allow_null is None:
+        allow_null = not creating
     if not isinstance(given, dict):
         raise ValueError('fields must be an object')
     allowed = ', '.join(sorted(declared)) or 'none: this journal declares no fields'
@@ -104,7 +106,7 @@ def check_fields(declared, given, creating):
             raise ValueError(f'field {name!r} is not declared for this journal; allowed fields: {allowed}')
         spec = declared[name]
         if value is None:
-            if creating:
+            if not allow_null:
                 raise ValueError(f'field {name!r} needs a value; null only clears a field when editing')
             if spec['required']:
                 raise ValueError(f'field {name!r} is required and cannot be cleared')
@@ -139,6 +141,42 @@ def merged_fields(current, incoming):
     return merged
 
 
+def append_body(existing, addition):
+    """Join an appended body onto an existing one, separated by a blank line."""
+    if not existing:
+        return addition
+    if not addition:
+        return existing
+    return existing + '\n\n' + addition
+
+
+def append_fields(current, incoming):
+    """Merge fields for an append: lists add new items in order without duplicates, objects merge key by key,
+    and text/number/boolean are replaced when given."""
+    merged = dict(current or {})
+    for name, value in incoming.items():
+        old = merged.get(name)
+        if isinstance(old, list) and isinstance(value, list):
+            combined = list(old)
+            for item in value:
+                if item not in combined:
+                    combined.append(item)
+            merged[name] = combined
+        elif isinstance(old, dict) and isinstance(value, dict):
+            merged[name] = {**old, **value}
+        elif isinstance(value, list):
+            combined = []
+            for item in value:
+                if item not in combined:
+                    combined.append(item)
+            merged[name] = combined
+        elif isinstance(value, dict):
+            merged[name] = dict(value)
+        else:
+            merged[name] = value
+    return merged
+
+
 def snapshot_parts(snapshot):
     if not isinstance(snapshot, dict) or snapshot.keys() != {'version', 'collections', 'entries'}:
         raise ValueError('invalid transfer snapshot')
@@ -163,6 +201,7 @@ class PenStore:
 
     def collections(self, writer, *, visible=None): raise NotImplementedError
     def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None): raise NotImplementedError
+    def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None): raise NotImplementedError
     def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): raise NotImplementedError
     def read(self, writer, id, version=None, *, visible=None): raise NotImplementedError
     def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): raise NotImplementedError
@@ -263,8 +302,17 @@ class LocalFilesPenStore(PenStore):
             if os.path.exists(tmp):
                 os.unlink(tmp)
 
+    def _now_dt(self):
+        return self.clock().astimezone(self.timezone)
+
     def _now(self):
-        return self.clock().astimezone(self.timezone).isoformat()
+        return self._now_dt().isoformat()
+
+    def _created_for_day(self, now_dt, day):
+        if day is None or day == now_dt.date().isoformat():
+            return now_dt.isoformat()
+        parsed = dt.date.fromisoformat(day)
+        return dt.datetime(parsed.year, parsed.month, parsed.day, tzinfo=self.timezone or now_dt.tzinfo).isoformat()
 
     @staticmethod
     def _valid_id(id):
@@ -375,6 +423,21 @@ class LocalFilesPenStore(PenStore):
             if staging.exists():
                 shutil.rmtree(staging)
 
+    def _create_entry(self, directory, mode, record):
+        if mode is None and not directory.exists():
+            staging = Path(tempfile.mkdtemp(prefix='.pen-', dir=directory.parent))
+            try:
+                (staging / '.pool').touch()
+                self._install_entry(staging / record['id'], [record])
+                os.replace(staging, directory)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+        else:
+            if mode is None and not self._checked(directory / '.silo').exists():
+                self._checked(directory / '.pool').touch()
+            self._install_entry(directory / record['id'], [record])
+
     def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
         self._fields(body, title, pinned)
         if fields is not None:
@@ -396,20 +459,77 @@ class LocalFilesPenStore(PenStore):
             stamp_surface(record, surface)
             if fields:
                 record['fields'] = fields
-            if mode is None and not directory.exists():
-                staging = Path(tempfile.mkdtemp(prefix='.pen-', dir=directory.parent))
-                try:
-                    (staging / '.pool').touch()
-                    self._install_entry(staging / id, [record])
-                    os.replace(staging, directory)
-                finally:
-                    if staging.exists():
-                        shutil.rmtree(staging)
-            else:
-                if mode is None and not self._checked(directory / '.silo').exists():
-                    self._checked(directory / '.pool').touch()
-                self._install_entry(directory / id, [record])
+            self._create_entry(directory, mode, record)
             return id
+
+    def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+        self._fields(body, title, False)
+        body.encode('utf-8')
+        if title is not None:
+            title.encode('utf-8')
+        if fields is not None:
+            stored_fields(fields)
+        if id is not None and day is not None:
+            raise ValueError('pass id or day, not both')
+        if day is not None and (not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day):
+            raise ValueError('day must be YYYY-MM-DD')
+        if surface is not None:
+            validate_surface(surface)
+        with self._lock(writer):
+            directory = self._collection(writer, collection)
+            if id is not None:
+                path = self._find(writer, id)
+                latest = self._versions(path)[-1]
+                record = self._record(writer, path.parent.name, path, latest)
+                if record['collection'] != collection:
+                    raise ValueError('entry does not belong to this collection')
+                record['body'] = append_body(record['body'], body)
+                if title is not None:
+                    record['title'] = title
+                record.update(version=latest + 1, edited=self._now())
+                stamp_surface(record, surface)
+                if fields:
+                    merged = append_fields(record.get('fields'), fields)
+                    stored_fields(merged)
+                    record['fields'] = merged
+                self._save(path / f'{latest + 1}.md', record)
+                return {'id': record['id'], 'version': latest + 1, 'action': 'appended'}
+            entries, mode = self._collection_records(writer, directory)
+            if mode is False:
+                raise ValueError('append without id requires a by_day collection')
+            now_dt = self._now_dt()
+            now = now_dt.isoformat()
+            target_day = day if day is not None else now[:10]
+            matches = [r for r in entries if r['created'][:10] == target_day]
+            matches.sort(key=lambda r: dt.datetime.fromisoformat(r['created']), reverse=True)
+            if matches:
+                existing = dict(matches[0])
+                next_version = existing['version'] + 1
+                existing['body'] = append_body(existing['body'], body)
+                if title is not None:
+                    existing['title'] = title
+                existing.update(version=next_version, edited=now)
+                stamp_surface(existing, surface)
+                if fields:
+                    merged = append_fields(existing.get('fields'), fields)
+                    stored_fields(merged)
+                    existing['fields'] = merged
+                self._save(self._checked(directory / existing['id']) / f'{next_version}.md', existing)
+                return {'id': existing['id'], 'version': next_version, 'action': 'appended'}
+            if on_create is not None:
+                on_create()
+            created = self._created_for_day(now_dt, day)
+            new_id = uuid.uuid4().hex
+            record = {'id': new_id, 'collection': collection, 'writer': writer, 'body': body,
+                      'created': created, 'edited': now, 'pinned': False, 'version': 1,
+                      'by_day': True, 'title': title if title is not None else target_day}
+            stamp_surface(record, surface)
+            if fields:
+                merged = append_fields(None, fields)
+                stored_fields(merged)
+                record['fields'] = merged
+            self._create_entry(directory, mode, record)
+            return {'id': new_id, 'version': 1, 'action': 'created'}
 
     def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)

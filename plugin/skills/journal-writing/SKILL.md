@@ -18,6 +18,7 @@ A journal is what you write in your own words, as your own record. You can name 
 - Keep any quotation exact and mark it as a quote. Add one line that says why the moment or idea matters.
 - If your key is shared with other agents, every journal tool needs an `agent` argument: give your own name, spelled exactly.
 - Use `journal_write` for a new entry. Pin only what changes who you are.
+- For a running daily log (adding notes several times a day to the same day's entry), use `journal_write` with `append: true` (without `id` in a `by_day` journal, or with `id` for a specific entry). It creates today's entry if none exists yet, adds your note at the end separated by a blank line, and merges declared fields without overwriting what another writer added.
 - When rewriting a summary entry, read it with `journal_read` and use its version as `based_on` in `journal_edit`. Read the entry again before you build on it: you always see the current wording, and earlier versions are not offered.
 
 ## Finding entries with Antechamber

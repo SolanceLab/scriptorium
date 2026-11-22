@@ -5,7 +5,7 @@ A journal is what the AI writes in its own words, as its own record, and it can 
 | Tool | Arguments and result |
 | --- | --- |
 | `journals` | Lists your journals with `collection`, active entry `count`, `by_day`, and the `fields` each declares. A journal you declared fields for and have not yet written in is listed with a count of 0. |
-| `journal_write` | Supply `collection` and `body`, with optional `title`, `pinned` (default false) and `fields`. Returns `id`. The first write creates the journal and can set `by_day: true`. |
+| `journal_write` | Supply `collection` and `body`, with optional `title`, `pinned` (default false), `by_day`, `append` (default false), `id` (only with `append: true`), and `fields`. Normal writes return `id`. With `append: true`, adds `body` to the end of today's entry (or the entry named by `id`) and returns `action` (`appended` or `created`), `id`, and `version`. |
 | `journal_edit` | Supply `id`, `based_on`, and any of `body`, `title`, `pinned` and `fields`. Returns the new `version`. Omitted values keep their values; `fields` merges into the entry's fields. A stale base is refused. |
 | `journal_read` | Supply `id`. Returns the current version. With history switched on it also takes `version`. |
 | `journal_list` | Supply `collection` and optionally `pinned_only`, `day` (`YYYY-MM-DD` for a `by_day` journal), `limit` (default 20), or `surface`. Returns active entries in order of creation, newest first. |
@@ -13,6 +13,16 @@ A journal is what the AI writes in its own words, as its own record, and it can 
 | `journal_delete` | Supply `id`. Moves the entry and its history aside and returns `ok: true`. |
 
 The old names (`pen_collections`, `pen_write`, `pen_edit`, `pen_read`, `pen_list`, `pen_history`, `pen_delete`) still work when called, with the same arguments and the same rules. They are not listed.
+
+## Appending to a running daily log
+
+A common pattern is an agent keeping a running daily log, adding notes several times a day without overwriting what another writer added a moment earlier. Pass `append: true` to `journal_write`:
+
+- **Without `id`**: appends to today's entry in that journal (using `SCRIPTORIUM_PEN_TZ`, or the system time zone when unset). If today has no entry yet, it creates one (using `title` from the call, or the day `YYYY-MM-DD` when omitted) and replies with `action: "created"`. Refused with a plain message if the journal is not grouped by day (`by_day`).
+- **With `id`**: appends to that specific entry (works on both `by_day` and flat journals).
+- **Body and fields**: the new `body` is added at the end separated by a blank line. Declared `fields` merge: lists add new items in order without duplicates, objects merge key by key, and text, number, and boolean fields are replaced only when given.
+- **Reply**: returns `{"action": "appended" | "created", "id": "...", "version": N}`.
+- **Atomicity, surface, and retries**: find-or-create and append happen atomically inside the store (under the writer lock locally, or in one transaction in SQL / Durable Object). Each append stamps the `surface` of the key used, as edits do, and `X-Request-Id` retries on the cloud server replay the reply so a retried append never adds the text twice. Custom stores must implement `append()`; otherwise `append: true` is refused rather than emulated by read-then-edit.
 
 <a name="entry-fields"></a>
 

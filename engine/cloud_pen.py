@@ -12,7 +12,8 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from engine.pen import (PEN_CONTRACT_VERSION, LocalFilesPenStore, PenStore,
-                        snapshot_parts, stamp_surface, stored_fields, validate_writer)
+                        append_body, append_fields, snapshot_parts, stamp_surface,
+                        stored_fields, validate_surface, validate_writer)
 
 _SCHEMA = [
     "CREATE TABLE IF NOT EXISTS pen_versions ("
@@ -118,6 +119,8 @@ class SqlPenStore(PenStore):
     _validate_record = LocalFilesPenStore._validate_record
     _merge_fields = staticmethod(LocalFilesPenStore._merge_fields)
     _name_key = staticmethod(LocalFilesPenStore._name_key)
+    _now_dt = LocalFilesPenStore._now_dt
+    _created_for_day = LocalFilesPenStore._created_for_day
 
     def __init__(self, adapter, timezone=None, clock=None):
         self.adapter = adapter
@@ -254,6 +257,86 @@ class SqlPenStore(PenStore):
         self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   self._row(record))
         return id
+
+    def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+        return self._atomic(lambda: self._append(writer, collection, body, id, day, fields, title, surface, on_create))
+
+    def _append(self, writer, collection, body, id, day, fields, title, surface, on_create):
+        self._fields(body, title, False)
+        self._text(body, title)
+        if fields is not None:
+            stored_fields(fields)
+        if id is not None and day is not None:
+            raise ValueError('pass id or day, not both')
+        if day is not None and (not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day):
+            raise ValueError('day must be YYYY-MM-DD')
+        if surface is not None:
+            validate_surface(surface)
+        self._collection(writer, collection)
+        if id is not None:
+            latest = self._versions(writer, id)[-1]
+            if latest['collection'] != collection:
+                raise ValueError('entry does not belong to this collection')
+            record = dict(latest)
+            record['body'] = append_body(record['body'], body)
+            if title is not None:
+                record['title'] = title
+            record.update(version=latest['version'] + 1, edited=self._now())
+            stamp_surface(record, surface)
+            if fields:
+                merged = append_fields(record.get('fields'), fields)
+                stored_fields(merged)
+                record['fields'] = merged
+            self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      self._row(record))
+            return {'id': record['id'], 'version': record['version'], 'action': 'appended'}
+        mode = self._mode(writer, collection)
+        if mode is False:
+            raise ValueError('append without id requires a by_day collection')
+        now_dt = self._now_dt()
+        now = now_dt.isoformat()
+        target_day = day if day is not None else now[:10]
+        rows = self._run(
+            "SELECT v.id, v.version, v.record FROM pen_versions v "
+            "WHERE v.writer = ? AND v.collection = ? AND v.deleted = 0 AND substr(v.created, 1, 10) = ? "
+            "AND v.version = (SELECT MAX(version) FROM pen_versions m WHERE m.writer = v.writer AND m.id = v.id AND m.deleted = 0) "
+            "ORDER BY v.created_us DESC, v.id ASC LIMIT 1",
+            (writer, collection, target_day))
+        if rows:
+            row = rows[0]
+            existing = json.loads(row['record'])
+            self._validate_record(writer, collection, row['id'], row['version'],
+                                  {k: v for k, v in existing.items() if k != 'body'}, existing.get('body'))
+            record = dict(existing)
+            record['body'] = append_body(record['body'], body)
+            if title is not None:
+                record['title'] = title
+            record.update(version=existing['version'] + 1, edited=now)
+            stamp_surface(record, surface)
+            if fields:
+                merged = append_fields(record.get('fields'), fields)
+                stored_fields(merged)
+                record['fields'] = merged
+            self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      self._row(record))
+            return {'id': record['id'], 'version': record['version'], 'action': 'appended'}
+        if on_create is not None:
+            on_create()
+        created = self._created_for_day(now_dt, day)
+        new_id = uuid.uuid4().hex
+        record = {'id': new_id, 'collection': collection, 'writer': writer, 'body': body,
+                  'created': created, 'edited': now, 'pinned': False, 'version': 1,
+                  'by_day': True, 'title': title if title is not None else target_day}
+        stamp_surface(record, surface)
+        if fields:
+            merged = append_fields(None, fields)
+            stored_fields(merged)
+            record['fields'] = merged
+        if mode is None:
+            self._run("INSERT OR IGNORE INTO pen_collections VALUES (?, ?, 'pool')", (writer, collection))
+        self._run(f"INSERT INTO pen_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  self._row(record))
+        return {'id': new_id, 'version': 1, 'action': 'created'}
 
     def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
         self._fields('' if body is None else body, title, False if pinned is None else pinned)

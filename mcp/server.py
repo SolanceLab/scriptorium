@@ -222,6 +222,14 @@ async def _maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
+def _store_append_method(pen):
+    from engine.pen import PenStore
+    method = getattr(pen, "append", None)
+    if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, "append", None):
+        return None
+    return method
+
+
 def check_store(store, *, min_version=None, fields=None, history=False, allow_async=False):
     """Validate that a PenStore implements the required methods, contract version, and history mode."""
     from engine.pen import PEN_CONTRACT_VERSION, PenStore
@@ -242,6 +250,11 @@ def check_store(store, *, min_version=None, fields=None, history=False, allow_as
             if not allow_async:
                 raise ValueError(f"pen store method {name} cannot be async in this server")
             has_async = True
+    append_method = _store_append_method(store)
+    if append_method is not None and _is_async_callable(append_method):
+        if not allow_async:
+            raise ValueError("pen store method append cannot be async in this server")
+        has_async = True
     mutate = getattr(store, "mutate", None)
     if has_async and callable(mutate) and not _is_async_callable(mutate):
         raise ValueError("pen store with async methods must declare async mutate")
@@ -281,10 +294,14 @@ def _journal_tools(history, keeps_history=True):
     rows = [
         ("journals", "List your journals (each with the fields it declares) and the counts of active entries. "
                      "Use of for another agent's pooled journals. " + _JOURNAL, {"of": _OF}, []),
-        ("journal_write", "Write a journal entry. " + _JOURNAL + "On first write to a journal, set by_day to group by "
-                          "creation day. A journal may declare its own fields: check `journals`, then pass them in `fields`.",
+        ("journal_write", "Write a journal entry, or append to an existing one with append: true (to today's entry in a "
+                          "by_day journal, creating it if absent, or to a specific entry with id). " + _JOURNAL +
+                          "On first write to a journal, set by_day to group by creation day. A journal may declare its "
+                          "own fields: check `journals`, then pass them in `fields`.",
          {"collection": dict(_TEXT, description="The journal's name."), "body": _TEXT, "title": _TEXT, "pinned": _BOOL,
-          "by_day": _BOOL, "fields": dict(_OBJECT, description="Values for the fields this journal declares.")},
+          "by_day": _BOOL, "append": dict(_BOOL, description="Add body to the end of today's entry (or the entry named by id) instead of creating a separate entry."),
+          "id": dict(_TEXT, description="Entry id to append to (only with append: true)."),
+          "fields": dict(_OBJECT, description="Values for the fields this journal declares.")},
          ["collection", "body"]),
         ("journal_edit", "Edit a journal entry using its current version as based_on. `fields` merges into the entry's "
                          "fields; a null clears an optional one.",
@@ -492,14 +509,31 @@ def _prepare_pen_call(name, args, agents, *, surface=None, policy=None, store=No
             if reads.get(writer) == "own":
                 return "this agent can only read its own notebooks", None
             args["visible"] = lambda collection, default: pooled(silo, owner, collection, default)
-    elif name in ("journal_write", "journal_edit"):
+    elif name == "journal_write":
+        do_append = args.pop("append", False)
+        if do_append:
+            if "pinned" in args:
+                return "pinned cannot be used with append", None
+            by_day = args.pop("by_day", None)
+            if by_day is False and "id" not in args:
+                return "append without id requires a by_day journal", None
+            if by_day is not None and "id" in args:
+                return "by_day cannot be used when appending by id", None
+            method_name = "append"
+        elif "id" in args:
+            return "id is only used with append", None
+        args["surface"] = surface
+    elif name == "journal_edit":
         args["surface"] = surface
     return None, (name, args, writer, owner, method_name, is_read, fields)
 
 
-def _format_pen_result(name, result, fields, owner, writer):
+def _format_pen_result(name, result, fields, owner, writer, method_name=None):
     if name == "journal_write":
-        result = {"id": result}
+        if method_name == "append":
+            result = {"id": result["id"], "version": result["version"], "action": result["action"]}
+        else:
+            result = {"id": result}
     elif name == "journal_edit":
         result = {"version": result}
     elif name == "journal_delete":
@@ -509,6 +543,37 @@ def _format_pen_result(name, result, fields, owner, writer):
     elif name == "journal_history":
         result = [_older(r, result[i + 1]) if i + 1 < len(result) else r for i, r in enumerate(result)]
     return json.dumps(result, ensure_ascii=False)
+
+
+def _declares_kwarg(fn, name):
+    """True only when fn explicitly declares a keyword-accepting parameter `name` (not merely **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (ValueError, TypeError):
+        return False
+    return any(
+        p.name == name and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        for p in params
+    )
+
+
+def _validate_pen_fields(name, method_name, args, declared, method):
+    from engine.pen import check_fields
+    given = args.get("fields", {})
+    if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
+        if method_name == "append":
+            check_fields(declared, given, False, allow_null=False)
+            if "id" not in args and any(spec["required"] and k not in given for k, spec in declared.items()):
+                if _declares_kwarg(method, "on_create"):
+                    args["on_create"] = lambda: check_fields(declared, given, True, allow_null=False)
+                else:
+                    # Custom stores that do not explicitly declare `on_create` cannot check required fields
+                    # atomically on create; fail closed so a new entry is never created without required fields.
+                    check_fields(declared, given, True, allow_null=False)
+        else:
+            check_fields(declared, given, name == "journal_write")
+    if not args.get("fields"):
+        args.pop("fields", None)    # stores take `fields` only when there is something to store
 
 
 def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
@@ -522,17 +587,20 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, field
         return "another write is running; try again when it finishes", True
     try:
         pen = Config.pen if store is None else store
+        if method_name == "append":
+            method = _store_append_method(pen)
+            if method is None:
+                return "this store does not support append", True
+        else:
+            method = getattr(pen, method_name)
         if "fields" in args or name == "journal_write":
-            from engine.pen import check_fields
             journal = (args.get("collection") if name == "journal_write"
                        else _no_awaitable(pen.read(owner, args["id"]))["collection"])
             declared = declared_fields(fields, owner, journal)
-            if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
-                check_fields(declared, args.get("fields", {}), name == "journal_write")
-            if not args.get("fields"):
-                args.pop("fields", None)    # stores take `fields` only when there is something to store
-        method = getattr(pen, method_name)
+            _validate_pen_fields(name, method_name, args, declared, method)
         result = _no_awaitable(method(owner, **args))
+        if method_name == "append" and "on_create" in args and isinstance(result, dict) and result.get("action") == "created":
+            raise ValueError("pen store created an entry without calling on_create")
         if name == "journal_read" and args.get("version"):
             try:
                 newer = _no_awaitable(method(owner, args["id"], args["version"] + 1,
@@ -542,7 +610,7 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, field
                 if str(e) != 'version not found':
                     raise    # a damaged newer version is an error, never passed off as 'current'
                 # no newer version: this one is current
-        return _format_pen_result(name, result, fields, owner, writer), False
+        return _format_pen_result(name, result, fields, owner, writer, method_name=method_name), False
     except OSError as e:
         if store is not None and not is_read:
             # Cloud writes share a transaction with the retry record. Let it roll back.
@@ -567,17 +635,20 @@ async def pen_tool_async(name, args, agents, *, surface=None, policy=None, store
     name, args, writer, owner, method_name, is_read, fields = prepared
     try:
         pen = Config.pen if store is None else store
+        if method_name == "append":
+            method = _store_append_method(pen)
+            if method is None:
+                return "this store does not support append", True
+        else:
+            method = getattr(pen, method_name)
         if "fields" in args or name == "journal_write":
-            from engine.pen import check_fields
             journal = (args.get("collection") if name == "journal_write"
                        else (await _maybe_await(pen.read(owner, args["id"])))["collection"])
             declared = declared_fields(fields, owner, journal)
-            if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
-                check_fields(declared, args.get("fields", {}), name == "journal_write")
-            if not args.get("fields"):
-                args.pop("fields", None)    # stores take `fields` only when there is something to store
-        method = getattr(pen, method_name)
+            _validate_pen_fields(name, method_name, args, declared, method)
         result = await _maybe_await(method(owner, **args))
+        if method_name == "append" and "on_create" in args and isinstance(result, dict) and result.get("action") == "created":
+            raise ValueError("pen store created an entry without calling on_create")
         if name == "journal_read" and args.get("version"):
             try:
                 newer = await _maybe_await(method(owner, args["id"], args["version"] + 1,
@@ -587,7 +658,7 @@ async def pen_tool_async(name, args, agents, *, surface=None, policy=None, store
                 if str(e) != 'version not found':
                     raise    # a damaged newer version is an error, never passed off as 'current'
                 # no newer version: this one is current
-        return _format_pen_result(name, result, fields, owner, writer), False
+        return _format_pen_result(name, result, fields, owner, writer, method_name=method_name), False
     except OSError as e:
         if store is not None and not is_read:
             raise

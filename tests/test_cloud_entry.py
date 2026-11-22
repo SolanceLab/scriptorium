@@ -1050,6 +1050,84 @@ class CustomStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             server.pen_tool('journal_delete', {'id': '0' * 32}, ('alpha',), store=async_store)
 
+    async def test_append_on_custom_store_refused_without_append_and_replayed_once_with_mutate(self):
+        # 1. Custom store without append() refuses append=True and never emulates it via edit().
+        no_append = FakeHttpCurrentOnlyStore(self.worker.env, with_mutate=True)
+        status, text = await entry.serve_async(
+            no_append, call('journal_write', {'collection': 'daily', 'body': 'hi', 'append': True}, 1), ('alpha',))
+        self.assertEqual(status, 200)
+        res = json.loads(text)['result']
+        self.assertTrue(res['isError'])
+        self.assertIn('does not support append', res['content'][0]['text'])
+        self.assertEqual(no_append.writes, 0)
+
+        # 2. Async keeps_history=False store with append() + mutate(): replaces in place and X-Request-Id retry adds once.
+        backing = {}
+        replays = {}
+
+        class AsyncAppendStore(FakeHttpCurrentOnlyStore):
+            def __init__(self, env):
+                super().__init__(env, backing=backing, with_mutate=False)
+                self.replays = replays
+                self.append_calls = 0
+
+            async def mutate(self, request_id, fingerprint, apply):
+                if request_id in self.replays:
+                    saved_fp, saved_reply = self.replays[request_id]
+                    if saved_fp != fingerprint:
+                        raise entry.RequestIdConflict()
+                    return saved_reply
+                reply = await apply()
+                if reply is not None:
+                    self.replays[request_id] = (fingerprint, reply)
+                return reply
+
+            async def append(self, writer, collection, body, *, id=None, day=None, fields=None, title=None, surface=None, on_create=None):
+                self.append_calls += 1
+                from engine.pen import append_body
+                target = backing.get((writer, id)) if id else next(
+                    (r for (w, _), r in backing.items() if w == writer and r['collection'] == collection), None)
+                if target is None:
+                    if on_create is not None:
+                        on_create()
+                    eid = 'd' * 32
+                    rec = {'id': eid, 'collection': collection, 'writer': writer, 'body': body,
+                           'title': title or (day or '2026-11-22'), 'version': 1, 'by_day': True, 'pinned': False}
+                    if surface is not None:
+                        rec['surface'] = surface
+                    backing[(writer, eid)] = rec
+                    return {'id': eid, 'version': 1, 'action': 'created'}
+                target['body'] = append_body(target['body'], body)
+                target['version'] += 1
+                if surface is not None:
+                    target['surface'] = surface
+                return {'id': target['id'], 'version': target['version'], 'action': 'appended'}
+
+        store = AsyncAppendStore(self.worker.env)
+        s1, t1 = await entry.serve_async(
+            store, call('journal_write', {'collection': 'daily', 'body': 'first', 'append': True}, 10),
+            ('alpha',), request_id='custom-app-1', surface='web')
+        s2, t2 = await entry.serve_async(
+            store, call('journal_write', {'collection': 'daily', 'body': 'first', 'append': True}, 11),
+            ('alpha',), request_id='custom-app-1', surface='web')
+        self.assertEqual((s1, s2), (200, 200))
+        self.assertEqual(json.loads(t2)['id'], 11)
+        self.assertEqual(store.append_calls, 1)
+
+        s3, t3 = await entry.serve_async(
+            store, call('journal_write', {'collection': 'daily', 'body': 'second', 'append': True}, 12),
+            ('alpha',), request_id='custom-app-2', surface='mobile')
+        s4, t4 = await entry.serve_async(
+            store, call('journal_write', {'collection': 'daily', 'body': 'second', 'append': True}, 13),
+            ('alpha',), request_id='custom-app-2', surface='mobile')
+        self.assertEqual((s3, s4), (200, 200))
+        self.assertEqual(store.append_calls, 2)
+        self.assertEqual(len(backing), 1)
+        rec = backing[('alpha', 'd' * 32)]
+        self.assertEqual(rec['body'], 'first\n\nsecond')
+        self.assertEqual(rec['version'], 2)
+        self.assertEqual(rec['surface'], 'mobile')
+
 
 class CustomStoreErrorTests(unittest.TestCase):
     def test_a_custom_store_read_error_never_reaches_the_model(self):
