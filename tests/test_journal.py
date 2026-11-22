@@ -745,3 +745,27 @@ class SharedStoreRulesTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AppendEdgeCaseTests(unittest.TestCase):
+    def test_merge_keeps_true_and_1_apart_even_nested(self):
+        from engine.pen import append_fields
+        merged = append_fields({'tags': [True, {'x': False}]}, {'tags': [1, {'x': 0}, True]})
+        self.assertEqual(merged['tags'], [True, {'x': False}, 1, {'x': 0}])
+
+    @unittest.skipUnless(hasattr(__import__('time'), 'tzset'), 'needs time.tzset')
+    def test_new_day_entry_uses_that_days_offset_without_a_store_timezone(self):
+        import datetime as dt, os, time
+        from engine.pen import LocalFilesPenStore
+        old = os.environ.get('TZ')
+        try:
+            os.environ['TZ'] = 'America/New_York'; time.tzset()
+            store = LocalFilesPenStore.__new__(LocalFilesPenStore)
+            store.timezone = None
+            july = dt.datetime(2026, 7, 10, 12, 0).astimezone()
+            self.assertTrue(store._created_for_day(july, '2026-01-15').endswith('-05:00'))
+            self.assertTrue(store._created_for_day(july, '2026-07-04').endswith('-04:00'))
+        finally:
+            if old is None: os.environ.pop('TZ', None)
+            else: os.environ['TZ'] = old
+            time.tzset()

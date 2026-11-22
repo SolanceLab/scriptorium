@@ -150,6 +150,11 @@ def append_body(existing, addition):
     return existing + '\n\n' + addition
 
 
+def _json_key(value):
+    """Type-aware identity for list items: true and 1 (or false and 0) are different values, nested too."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def append_fields(current, incoming):
     """Merge fields for an append: lists add new items in order without duplicates, objects merge key by key,
     and text/number/boolean are replaced when given."""
@@ -158,16 +163,19 @@ def append_fields(current, incoming):
         old = merged.get(name)
         if isinstance(old, list) and isinstance(value, list):
             combined = list(old)
+            seen = {_json_key(item) for item in combined}
             for item in value:
-                if item not in combined:
+                if _json_key(item) not in seen:
+                    seen.add(_json_key(item))
                     combined.append(item)
             merged[name] = combined
         elif isinstance(old, dict) and isinstance(value, dict):
             merged[name] = {**old, **value}
         elif isinstance(value, list):
-            combined = []
+            combined, seen = [], set()
             for item in value:
-                if item not in combined:
+                if _json_key(item) not in seen:
+                    seen.add(_json_key(item))
                     combined.append(item)
             merged[name] = combined
         elif isinstance(value, dict):
@@ -312,7 +320,10 @@ class LocalFilesPenStore(PenStore):
         if day is None or day == now_dt.date().isoformat():
             return now_dt.isoformat()
         parsed = dt.date.fromisoformat(day)
-        return dt.datetime(parsed.year, parsed.month, parsed.day, tzinfo=self.timezone or now_dt.tzinfo).isoformat()
+        if self.timezone is not None:
+            return dt.datetime(parsed.year, parsed.month, parsed.day, tzinfo=self.timezone).isoformat()
+        # no store timezone: the system's offset ON THAT DAY (daylight saving may differ from today's)
+        return dt.datetime(parsed.year, parsed.month, parsed.day).astimezone().isoformat()
 
     @staticmethod
     def _valid_id(id):
