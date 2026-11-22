@@ -1051,6 +1051,20 @@ class CustomStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
             server.pen_tool('journal_delete', {'id': '0' * 32}, ('alpha',), store=async_store)
 
 
+class CustomStoreErrorTests(unittest.TestCase):
+    def test_a_custom_store_read_error_never_reaches_the_model(self):
+        class LeakyRead(FakeHttpCurrentOnlyStore):
+            def read(self, writer, id, version=None, *, visible=None):
+                raise OSError('backend said token=PLANTED-VALUE-123 at db.example.internal')
+        store = LeakyRead(SimpleNamespace())
+        with mock.patch('sys.stderr'):
+            text, is_error = server.pen_tool('journal_read', {'id': '0' * 32}, ('alpha',), store=store)
+        self.assertTrue(is_error)
+        self.assertNotIn('PLANTED-VALUE-123', text)
+        self.assertNotIn('db.example.internal', text)
+        self.assertIn('storage error', text)
+
+
 class BuildTests(unittest.TestCase):
     def _load_build(self):
         spec = importlib.util.spec_from_file_location('cloud_build', ROOT / 'cloud' / 'build.py')
@@ -1096,6 +1110,9 @@ class BuildTests(unittest.TestCase):
                 p.write_text('x = 1\n', encoding='utf-8')
                 reserved.append(p)
 
+            for upper in ('Entry.py', 'SERVER.py'):    # case-insensitive filesystems: must not overwrite entry.py/server.py
+                d = src_dir / ('case_' + upper.split('.')[0]); d.mkdir()
+                p = d / upper; p.write_text('x = 1\n', encoding='utf-8'); reserved.append(p)
             for bad in (src_dir, src_dir / 'missing.py', link, txt, bad_ident, *reserved):
                 with self.subTest(bad=bad), self.assertRaises(SystemExit):
                     build.build(out, store=bad)

@@ -23,7 +23,7 @@ def _checked_store(store):
         raise SystemExit(f"refusing --store {store}: must be a regular Python file, not a link or folder")
     if path.suffix != ".py" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path.stem):
         raise SystemExit(f"refusing --store {store}: filename must be a valid Python module name ending in .py")
-    if path.name in RESERVED_STORE_NAMES:
+    if path.name.lower() in {n.lower() for n in RESERVED_STORE_NAMES}:    # case-insensitive filesystems
         raise SystemExit(f"refusing --store {store}: {path.name} collides with a built-in Worker file")
     return path
 

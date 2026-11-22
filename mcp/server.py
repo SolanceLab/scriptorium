@@ -547,6 +547,10 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, field
         if store is not None and not is_read:
             # Cloud writes share a transaction with the retry record. Let it roll back.
             raise
+        if store is not None:
+            # a custom store's backend error can carry its own details (addresses, tokens): log it, never show it
+            print(f"scriptorium: storage error in {name}: {e}", file=sys.stderr)
+            return "storage error: the journal store could not be read; the server log has the details", True
         return str(e), True
     except ValueError as e:
         return str(e), True
@@ -587,6 +591,10 @@ async def pen_tool_async(name, args, agents, *, surface=None, policy=None, store
     except OSError as e:
         if store is not None and not is_read:
             raise
+        if store is not None:
+            # a custom store's backend error can carry its own details (addresses, tokens): log it, never show it
+            print(f"scriptorium: storage error in {name}: {e}", file=sys.stderr)
+            return "storage error: the journal store could not be read; the server log has the details", True
         return str(e), True
     except ValueError as e:
         return str(e), True
