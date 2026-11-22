@@ -314,6 +314,25 @@ class SettingsTests(Base):
         self.assertEqual(LocalFilesPenStore.contract_version, 3)
         self.assertEqual(SqlPenStore.contract_version, 3)
 
+    def test_local_server_refuses_history_on_with_keeps_history_false(self):
+        class CurrentOnly:
+            contract_version = 3
+            keeps_history = False
+            def collections(self, writer, *, visible=None): return []
+            def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None): return 'a' * 32
+            def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): return 2
+            def read(self, writer, id, version=None, *, visible=None): raise ValueError('entry not found')
+            def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None): return []
+            def delete(self, writer, id): return None
+
+        module = type(sys)('current_only_local')
+        module.store = CurrentOnly()
+        with mock.patch.dict(sys.modules, {'current_only_local': module}):
+            self.configure(pen_ref='current_only_local:store')
+            self.assertNotIn('journal_history', self.listed())
+            with self.assertRaisesRegex(SystemExit, 'SCRIPTORIUM_HISTORY=on'):
+                self.configure({'SCRIPTORIUM_HISTORY': 'on'}, pen_ref='current_only_local:store')
+
 
 class CloudParityTests(unittest.TestCase):
     """The Worker runs the same handle(), so fields and history behave the same there."""

@@ -54,6 +54,16 @@ Apps can send an `X-Request-Id` header with `journal_write`, `journal_edit`, and
 
 The free plan has daily limits on requests and on database reads and writes, and a total storage size. They are far above what one AI writing entries uses, but check Cloudflare's current numbers on their pricing page, since they change. One request body may be up to 1,000,000 bytes. Cloudflare may still label Python Workers as beta.
 
+## Bring your own store
+
+Already keep your notes in your own database (Postgres, Supabase, or an internal API)? You can run Scriptorium's cloud Worker in front of it instead of moving your notes into Cloudflare's Durable Object.
+
+1. Write one Python module containing a store class that implements Scriptorium's v3 entry store contract and accepts the Worker `env` in `__init__(self, env)` (so it can read its own secrets).
+2. Bundle it into the Worker folder: `python3 cloud/build.py --store path/to/my_store.py` (this copies only that single `.py` file alongside the Worker code).
+3. Set `SCRIPTORIUM_STORE = "my_store:MyStore"` in `[vars]` in `cloud/wrangler.toml`. When `SCRIPTORIUM_STORE` is set, the Worker uses your store directly and does not need the Durable Object binding. Leaving `SCRIPTORIUM_STORE` unset keeps the default Durable Object store.
+
+If your store does not implement `mutate(request_id, fingerprint, apply)`, the Worker refuses `X-Request-Id` on writes with HTTP 400 rather than pretending writes are retry-safe. If your database keeps only the current entry (no version history and no set-aside deletes), set `keeps_history = False` on your store class. See [Plug in your own store](your-own-store.md#pen-store) for the exact contract.
+
 ## Moving between local and cloud
 
 Local and cloud are separate stores. Transfer of an entire entry store between them is outside this release. The [store interface](your-own-store.md) defines export and import methods for storage implementations.

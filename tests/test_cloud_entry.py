@@ -572,21 +572,552 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.pen.store.export_pen('alpha')), 1)
 
 
+class FakeHttpCurrentOnlyStore:
+    """Fake HTTP-like backend: keeps only the current row per entry (replace on edit, remove on delete, no history)."""
+    contract_version = 3
+    keeps_history = False
+
+    def __init__(self, env, *, backing=None, with_mutate=False):
+        self.env = env
+        self.secret = getattr(env, 'BACKEND_SECRET', None)
+        self.rows = backing if backing is not None else {}       # (writer, id) -> current record dict
+        self.replays = {}                                       # request_id -> (fingerprint, reply_json)
+        self.writes = 0
+        self.mutate_calls = 0
+        if with_mutate:
+            self.mutate = self._mutate
+
+    def _mutate(self, request_id, fingerprint, apply):
+        self.mutate_calls += 1
+        if request_id in self.replays:
+            saved_fp, saved_reply = self.replays[request_id]
+            if saved_fp != fingerprint:
+                raise ValueError('this X-Request-Id was already used with a different request')
+            return saved_reply
+        reply = apply()
+        if reply is not None:
+            self.replays[request_id] = (fingerprint, reply)
+        return reply
+
+    def collections(self, writer, *, visible=None):
+        counts = {}
+        for (w, _), rec in self.rows.items():
+            if w == writer:
+                counts[rec['collection']] = counts.get(rec['collection'], 0) + 1
+        return [{'collection': name, 'count': count, 'by_day': False}
+                for name, count in sorted(counts.items())
+                if visible is None or visible(name, 'pool')]
+
+    def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+        self.writes += 1
+        entry_id = f'{self.writes:032x}'
+        now = '2026-11-22T12:00:00+00:00'
+        record = {'id': entry_id, 'collection': collection, 'writer': writer, 'body': body,
+                  'created': now, 'edited': now, 'pinned': pinned, 'version': 1, 'by_day': bool(by_day)}
+        if title is not None:
+            record['title'] = title
+        if surface is not None:
+            record['surface'] = surface
+        if fields:
+            record['fields'] = fields
+        self.rows[(writer, entry_id)] = record
+        return entry_id
+
+    def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
+        current = self.rows.get((writer, id))
+        if current is None:
+            raise ValueError('entry not found')
+        if based_on != current['version']:
+            raise ValueError('version conflict')
+        updated = dict(current, version=current['version'] + 1, edited='2026-11-22T12:05:00+00:00')
+        if body is not None:
+            updated['body'] = body
+        if title is not None:
+            updated['title'] = title
+        if pinned is not None:
+            updated['pinned'] = pinned
+        if surface is not None:
+            updated['surface'] = surface
+        if fields is not None:
+            merged = dict(updated.get('fields') or {})
+            for k, v in fields.items():
+                if v is None:
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
+            if merged:
+                updated['fields'] = merged
+            else:
+                updated.pop('fields', None)
+        # Replace in place: no prior version is kept anywhere.
+        self.rows[(writer, id)] = updated
+        return updated['version']
+
+    def read(self, writer, id, version=None, *, visible=None):
+        if version is not None:
+            raise ValueError('this store does not keep history')
+        rec = self.rows.get((writer, id))
+        if rec is None or (visible is not None and not visible(rec['collection'], 'pool')):
+            raise ValueError('entry not found')
+        return dict(rec)
+
+    def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None):
+        if visible is not None and not visible(collection, 'pool'):
+            raise ValueError('collection not found')
+        items = [dict(rec) for (w, _), rec in self.rows.items()
+                 if w == writer and rec['collection'] == collection
+                 and (not pinned_only or rec['pinned'])
+                 and (surface is None or rec.get('surface') == surface)]
+        return items[:limit]
+
+    def delete(self, writer, id):
+        if (writer, id) not in self.rows:
+            raise ValueError('entry not found')
+        # Remove permanently: no set-aside.
+        del self.rows[(writer, id)]
+
+
+class CustomStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.worker = entry.Default()
+        self.worker.env = SimpleNamespace(
+            SCRIPTORIUM_MCP_KEY=MAIN, A=A_KEY, B=B_KEY, BACKEND_SECRET='tok-123',
+            SCRIPTORIUM_AGENTS=json.dumps({'A': 'alpha', 'B': ['beta', 'gamma']}),
+        )
+        response = mock.patch.object(entry, 'Response',
+                                     lambda body, *, status, headers=None: SimpleNamespace(
+                                         body=body, status=status, headers=headers))
+        response.start()
+        self.addCleanup(response.stop)
+
+    async def fetch(self, body, *, key=A_KEY, request_id=None):
+        headers = {'content-type': 'application/json', 'authorization': 'Bearer ' + key}
+        if request_id is not None:
+            headers['x-request-id'] = request_id
+        request = SimpleNamespace(method='POST', url='https://example.test/mcp',
+                                  headers=headers, text=mock.AsyncMock(return_value=body))
+        return await self.worker.fetch(request)
+
+    async def test_worker_builds_custom_store_from_env_without_durable_object(self):
+        backing = {}
+        seen_secrets = []
+
+        class ConfiguredStore(FakeHttpCurrentOnlyStore):
+            def __init__(self, env):
+                super().__init__(env, backing=backing)
+                seen_secrets.append(self.secret)
+
+        mod = type(sys)('fake_cloud_store')
+        mod.ConfiguredStore = ConfiguredStore
+        self.worker.env.SCRIPTORIUM_STORE = 'fake_cloud_store:ConfiguredStore'
+        with mock.patch.dict(sys.modules, {'fake_cloud_store': mod}):
+            res = await self.fetch(call('journal_write', {'collection': 'journal', 'body': 'hello'}))
+            self.assertEqual(res.status, 200)
+            entry_id = json.loads(json.loads(res.body)['result']['content'][0]['text'])['id']
+            res = await self.fetch(call('journal_read', {'id': entry_id}))
+            self.assertEqual(res.status, 200)
+            self.assertEqual(json.loads(json.loads(res.body)['result']['content'][0]['text'])['body'], 'hello')
+        self.assertEqual(seen_secrets, ['tok-123', 'tok-123'])
+        self.assertFalse(hasattr(self.worker.env, 'PEN'))
+
+    async def test_worker_refuses_unknown_or_invalid_store_at_start(self):
+        class MissingWrite(FakeHttpCurrentOnlyStore):
+            write = None
+
+        class NeedsHistory(FakeHttpCurrentOnlyStore):
+            keeps_history = True  # lacks history()
+
+        class OldVersion(FakeHttpCurrentOnlyStore):
+            contract_version = 2
+
+        class BadKeepsHistory(FakeHttpCurrentOnlyStore):
+            keeps_history = 'no'
+
+        class ExplodingInit(FakeHttpCurrentOnlyStore):
+            def __init__(self, env):
+                raise ValueError('missing backend url')
+
+        mod = type(sys)('bad_cloud_stores')
+        mod.MissingWrite = MissingWrite
+        mod.NeedsHistory = NeedsHistory
+        mod.OldVersion = OldVersion
+        mod.BadKeepsHistory = BadKeepsHistory
+        mod.ExplodingInit = ExplodingInit
+        mod.NOT_CALLABLE = 42
+
+        bad_refs = [
+            '',
+            'no_colon',
+            'bad_cloud_stores: MissingWrite',
+            'no_such_module_xyz:Store',
+            'bad_cloud_stores:DoesNotExist',
+            'bad_cloud_stores:NOT_CALLABLE',
+            'bad_cloud_stores:MissingWrite',
+            'bad_cloud_stores:NeedsHistory',
+            'bad_cloud_stores:OldVersion',
+            'bad_cloud_stores:BadKeepsHistory',
+            'bad_cloud_stores:ExplodingInit',
+        ]
+        with mock.patch.dict(sys.modules, {'bad_cloud_stores': mod}):
+            for ref in bad_refs:
+                with self.subTest(ref=ref):
+                    self.worker.env.SCRIPTORIUM_STORE = ref
+                    res = await self.fetch(json.dumps(rpc('tools/list')))
+                    self.assertEqual(res.status, 503)
+                    self.assertIn('SCRIPTORIUM_STORE', json.loads(res.body)['error'])
+
+    async def test_x_request_id_refused_without_mutate_and_replayed_once_with_mutate(self):
+        # 1. Without mutate(): X-Request-Id on writes is refused with HTTP 400 and does not write.
+        plain_store = FakeHttpCurrentOnlyStore(self.worker.env, with_mutate=False)
+        status, text = entry.serve(plain_store, call('journal_write', {'collection': 'journal', 'body': 'nope'}, 7),
+                                   ('alpha',), request_id='req-1')
+        self.assertEqual(status, 400)
+        body = json.loads(text)
+        self.assertEqual(body['id'], 7)
+        self.assertIn('X-Request-Id', body['error']['message'])
+        self.assertEqual(plain_store.writes, 0)
+        # Reads with X-Request-Id and writes without X-Request-Id still work.
+        status, _ = entry.serve(plain_store, call('journal_list', {'collection': 'journal'}), ('alpha',), request_id='req-r')
+        self.assertEqual(status, 200)
+        status, _ = entry.serve(plain_store, call('journal_write', {'collection': 'journal', 'body': 'ok'}), ('alpha',))
+        self.assertEqual(status, 200)
+        self.assertEqual(plain_store.writes, 1)
+
+        # 2. With mutate(): replay returns saved answer with current id, writes once, conflicts return 409.
+        retry_store = FakeHttpCurrentOnlyStore(self.worker.env, with_mutate=True)
+        write_1 = call('journal_write', {'collection': 'journal', 'body': 'once'}, 10)
+        write_1_retry = call('journal_write', {'collection': 'journal', 'body': 'once'}, 11)
+        first = entry.serve(retry_store, write_1, ('alpha',), request_id='req-ok')
+        again = entry.serve(retry_store, write_1_retry, ('alpha',), request_id='req-ok')
+        self.assertEqual(first[0], 200)
+        self.assertEqual(again[0], 200)
+        self.assertEqual(json.loads(again[1])['id'], 11)
+        self.assertEqual(json.loads(again[1])['result'], json.loads(first[1])['result'])
+        self.assertEqual(retry_store.writes, 1)
+
+        # Different request with same X-Request-Id -> HTTP 409, no second write.
+        conflict = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'other'}, 12),
+                               ('alpha',), request_id='req-ok')
+        self.assertEqual(conflict[0], 409)
+        self.assertEqual(json.loads(conflict[1])['id'], 12)
+        self.assertEqual(retry_store.writes, 1)
+
+        # Failed write is not saved by mutate, so a later valid write with the same id succeeds.
+        bad_edit = call('journal_edit', {'id': 'f' * 32, 'based_on': 1, 'body': 'missing'}, 13)
+        failed = entry.serve(retry_store, bad_edit, ('alpha',), request_id='req-fail')
+        self.assertEqual(failed[0], 200)
+        self.assertTrue(json.loads(failed[1])['result']['isError'])
+        alpha_fail_key = entry._scoped_request_id('alpha', 'req-fail')
+        self.assertNotIn(alpha_fail_key, retry_store.replays)
+        good_after = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'good'}, 14),
+                                 ('alpha',), request_id='req-fail')
+        self.assertEqual(good_after[0], 200)
+        self.assertIn(alpha_fail_key, retry_store.replays)
+
+        # Two writers using the same X-Request-Id do not collide or reveal each other's retries.
+        alpha_shared = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'from-alpha'}, 16),
+                                   ('alpha',), request_id='shared-id')
+        beta_shared = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'from-beta'}, 17),
+                                  ('beta',), request_id='shared-id')
+        self.assertEqual(alpha_shared[0], 200)
+        self.assertEqual(beta_shared[0], 200)
+        alpha_id = json.loads(json.loads(alpha_shared[1])['result']['content'][0]['text'])['id']
+        beta_id = json.loads(json.loads(beta_shared[1])['result']['content'][0]['text'])['id']
+        self.assertNotEqual(alpha_id, beta_id)
+        # Replaying beta's shared-id returns beta's answer, not alpha's.
+        beta_replay = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'from-beta'}, 18),
+                                  ('beta',), request_id='shared-id')
+        self.assertEqual(beta_replay[0], 200)
+        self.assertEqual(json.loads(json.loads(beta_replay[1])['result']['content'][0]['text'])['id'], beta_id)
+
+        # Multi-agent key omitting `agent` returns a tool error without calling mutate().
+        before_missing = retry_store.mutate_calls
+        missing_agent = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'who'}, 19),
+                                    ('beta', 'gamma'), request_id='req-missing')
+        self.assertEqual(missing_agent[0], 200)
+        self.assertTrue(json.loads(missing_agent[1])['result']['isError'])
+        self.assertEqual(retry_store.mutate_calls, before_missing)
+
+        # Unauthorized agent is refused with 403 before mutate() is called (no probing).
+        before = retry_store.mutate_calls
+        denied = entry.serve(retry_store, call('journal_write', {'collection': 'journal', 'body': 'x', 'agent': 'beta'}, 15),
+                             ('alpha',), request_id='req-ok')
+        self.assertEqual(denied[0], 403)
+        self.assertEqual(retry_store.mutate_calls, before)
+
+    async def test_keeps_history_false_refuses_history_on_and_replaces_and_removes(self):
+        backing = {}
+
+        class CurrentOnly(FakeHttpCurrentOnlyStore):
+            def __init__(self, env):
+                super().__init__(env, backing=backing)
+
+        mod = type(sys)('current_only_store')
+        mod.CurrentOnly = CurrentOnly
+        self.worker.env.SCRIPTORIUM_STORE = 'current_only_store:CurrentOnly'
+
+        with mock.patch.dict(sys.modules, {'current_only_store': mod}):
+            # SCRIPTORIUM_HISTORY=on with keeps_history=False refuses to start (503).
+            self.worker.env.SCRIPTORIUM_HISTORY = 'on'
+            refused = await self.fetch(json.dumps(rpc('tools/list')))
+            self.assertEqual(refused.status, 503)
+            self.assertIn('SCRIPTORIUM_HISTORY=on', json.loads(refused.body)['error'])
+
+            # With history off, journal_history is hidden and uncallable; edit replaces; delete removes.
+            self.worker.env.SCRIPTORIUM_HISTORY = 'off'
+            listed = json.loads((await self.fetch(json.dumps(rpc('tools/list')))).body)['result']['tools']
+            by_name = {t['name']: t for t in listed}
+            self.assertNotIn('journal_history', by_name)
+            self.assertNotIn('version', by_name['journal_read']['inputSchema']['properties'])
+            self.assertNotIn('kept by the store', by_name['journal_read']['description'])
+            self.assertNotIn('aside for recovery', by_name['journal_delete']['description'])
+
+            for hist_name in ('journal_history', 'pen_history'):
+                res = await self.fetch(call(hist_name, {'id': '0' * 32}))
+                self.assertEqual(json.loads(res.body)['error']['message'], 'unknown tool: ' + hist_name)
+
+            # Write -> edit replaces in place -> read returns only new version, version arg refused.
+            written = json.loads(json.loads((await self.fetch(
+                call('journal_write', {'collection': 'journal', 'body': 'first'})
+            )).body)['result']['content'][0]['text'])
+            entry_id = written['id']
+            edited = json.loads(json.loads((await self.fetch(
+                call('journal_edit', {'id': entry_id, 'based_on': 1, 'body': 'replaced'})
+            )).body)['result']['content'][0]['text'])
+            self.assertEqual(edited, {'version': 2})
+            self.assertEqual(len(backing), 1)
+            self.assertEqual(backing[('alpha', entry_id)]['body'], 'replaced')
+
+            read_back = json.loads(json.loads((await self.fetch(
+                call('journal_read', {'id': entry_id})
+            )).body)['result']['content'][0]['text'])
+            self.assertEqual(read_back['body'], 'replaced')
+            self.assertEqual(read_back['version'], 2)
+
+            old_req = json.loads((await self.fetch(
+                call('journal_read', {'id': entry_id, 'version': 1})
+            )).body)['result']
+            self.assertTrue(old_req['isError'])
+            self.assertEqual(old_req['content'][0]['text'], 'unknown argument')
+
+            # Even a direct serve(..., history=True) cannot expose history on a keeps_history=False store.
+            direct_store = CurrentOnly(self.worker.env)
+            _, hist_text = entry.serve(direct_store, call('journal_history', {'id': entry_id}), ('alpha',), history=True)
+            self.assertEqual(json.loads(hist_text)['error']['message'], 'unknown tool: journal_history')
+
+            # Delete removes permanently (no set-aside).
+            deleted = json.loads(json.loads((await self.fetch(
+                call('journal_delete', {'id': entry_id})
+            )).body)['result']['content'][0]['text'])
+            self.assertEqual(deleted, {'ok': True})
+            self.assertEqual(backing, {})
+            after_delete = json.loads((await self.fetch(call('journal_read', {'id': entry_id}))).body)['result']
+            self.assertTrue(after_delete['isError'])
+            self.assertEqual(after_delete['content'][0]['text'], 'entry not found')
+
+    async def test_auth_and_route_run_before_store_init_and_init_errors_never_leak_config(self):
+        init_calls = []
+
+        class LeakyInitStore(FakeHttpCurrentOnlyStore):
+            def __init__(self, env):
+                init_calls.append(True)
+                raise ValueError('cannot connect to postgres://admin:supersecret@db.internal:5432/notes')
+
+        mod = type(sys)('leaky_init_store')
+        mod.LeakyInitStore = LeakyInitStore
+        self.worker.env.SCRIPTORIUM_STORE = 'leaky_init_store:LeakyInitStore'
+
+        with mock.patch.dict(sys.modules, {'leaky_init_store': mod}):
+            # Unauthenticated request gets 401 without constructing the store.
+            unauth = await self.fetch(json.dumps(rpc('tools/list')), key='wrong-key-0000000000000000')
+            self.assertEqual(unauth.status, 401)
+            self.assertEqual(init_calls, [])
+
+            # Wrong method and wrong path fail before constructing the store.
+            for method, path, expected in (('GET', '/mcp', 405), ('POST', '/nope', 404)):
+                req = SimpleNamespace(method=method, url='https://example.test' + path,
+                                      headers={'content-type': 'application/json', 'authorization': 'Bearer ' + A_KEY},
+                                      text=mock.AsyncMock(return_value='{}'))
+                res = await self.worker.fetch(req)
+                self.assertEqual(res.status, expected)
+            self.assertEqual(init_calls, [])
+
+            # Authenticated valid request gets a generic 503 without leaking backend URL or credentials.
+            authed = await self.fetch(json.dumps(rpc('tools/list')))
+            self.assertEqual(authed.status, 503)
+            self.assertEqual(len(init_calls), 1)
+            err_text = json.loads(authed.body)['error']
+            self.assertIn('SCRIPTORIUM_STORE', err_text)
+            self.assertIn('failed to initialize', err_text)
+            for secret in ('postgres://', 'supersecret', 'db.internal', 'admin'):
+                self.assertNotIn(secret, err_text)
+
+    async def test_async_custom_store_methods_and_async_mutate_are_awaited(self):
+        backing = {}
+        replays = {}
+
+        class AsyncHttpStore:
+            contract_version = 3
+            keeps_history = False
+
+            def __init__(self, env):
+                self._inner = FakeHttpCurrentOnlyStore(env, backing=backing)
+                self.replays = replays
+
+            async def mutate(self, request_id, fingerprint, apply):
+                if request_id in self.replays:
+                    saved_fp, saved_reply = self.replays[request_id]
+                    if saved_fp != fingerprint:
+                        raise ValueError('this X-Request-Id was already used with a different request')
+                    return saved_reply
+                reply = await apply()
+                if reply is not None:
+                    self.replays[request_id] = (fingerprint, reply)
+                return reply
+
+            async def collections(self, writer, *, visible=None):
+                return self._inner.collections(writer, visible=visible)
+
+            async def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None):
+                return self._inner.write(writer, collection, body, title=title, pinned=pinned,
+                                         by_day=by_day, surface=surface, fields=fields)
+
+            async def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None):
+                return self._inner.edit(writer, id, based_on, body=body, title=title,
+                                        pinned=pinned, surface=surface, fields=fields)
+
+            async def read(self, writer, id, version=None, *, visible=None):
+                return self._inner.read(writer, id, version=version, visible=visible)
+
+            async def list(self, writer, collection, pinned_only=False, day=None, limit=20, *, surface=None, visible=None):
+                return self._inner.list(writer, collection, pinned_only=pinned_only, day=day,
+                                        limit=limit, surface=surface, visible=visible)
+
+            async def delete(self, writer, id):
+                return self._inner.delete(writer, id)
+
+        class AsyncStoreWithSyncMutate(AsyncHttpStore):
+            def mutate(self, request_id, fingerprint, apply):
+                return apply()
+
+        mod = type(sys)('async_cloud_store')
+        mod.AsyncHttpStore = AsyncHttpStore
+        mod.AsyncStoreWithSyncMutate = AsyncStoreWithSyncMutate
+        self.worker.env.SCRIPTORIUM_STORE = 'async_cloud_store:AsyncHttpStore'
+        self.worker.env.SCRIPTORIUM_FIELDS = json.dumps({'alpha': {'journal': {'mood': 'text'}}})
+
+        with mock.patch.dict(sys.modules, {'async_cloud_store': mod}):
+            # Write with X-Request-Id (awaits async mutate + async write) and replay once.
+            w_body = call('journal_write', {'collection': 'journal', 'body': 'async hi', 'fields': {'mood': 'calm'}}, 1)
+            res1 = await self.fetch(w_body, request_id='async-1')
+            self.assertEqual(res1.status, 200)
+            entry_id = json.loads(json.loads(res1.body)['result']['content'][0]['text'])['id']
+            res2 = await self.fetch(call('journal_write', {'collection': 'journal', 'body': 'async hi', 'fields': {'mood': 'calm'}}, 2),
+                                    request_id='async-1')
+            self.assertEqual(res2.status, 200)
+            self.assertEqual(json.loads(res2.body)['id'], 2)
+            self.assertEqual(len(backing), 1)
+
+            # Edit with fields (awaits both pen.read for field check and pen.edit).
+            edit_res = await self.fetch(call('journal_edit', {'id': entry_id, 'based_on': 1, 'body': 'edited',
+                                                              'fields': {'mood': 'bright'}}))
+            self.assertEqual(edit_res.status, 200)
+            self.assertEqual(json.loads(json.loads(edit_res.body)['result']['content'][0]['text']), {'version': 2})
+
+            # Read, list, journals all await async methods.
+            read_res = await self.fetch(call('journal_read', {'id': entry_id}))
+            self.assertEqual(json.loads(json.loads(read_res.body)['result']['content'][0]['text'])['body'], 'edited')
+            list_res = await self.fetch(call('journal_list', {'collection': 'journal'}))
+            self.assertEqual(len(json.loads(json.loads(list_res.body)['result']['content'][0]['text'])), 1)
+            cols_res = await self.fetch(call('journals', {}))
+            self.assertEqual(json.loads(json.loads(cols_res.body)['result']['content'][0]['text'])[0]['collection'], 'journal')
+
+            # Delete MUST be awaited and actually remove the entry from backing.
+            del_res = await self.fetch(call('journal_delete', {'id': entry_id}))
+            self.assertEqual(del_res.status, 200)
+            self.assertEqual(json.loads(json.loads(del_res.body)['result']['content'][0]['text']), {'ok': True})
+            self.assertEqual(backing, {})
+
+            # Async store with sync mutate is refused (503).
+            self.worker.env.SCRIPTORIUM_STORE = 'async_cloud_store:AsyncStoreWithSyncMutate'
+            bad = await self.fetch(json.dumps(rpc('tools/list')))
+            self.assertEqual(bad.status, 503)
+
+        # Sync check_store (local server) rejects async stores, and sync pen_tool never discards async delete().
+        async_store = AsyncHttpStore(self.worker.env)
+        with self.assertRaises(ValueError):
+            server.check_store(async_store)
+        with self.assertRaises(TypeError):
+            server.pen_tool('journal_delete', {'id': '0' * 32}, ('alpha',), store=async_store)
+
+
 class BuildTests(unittest.TestCase):
-    def test_the_build_copies_the_sources_unchanged(self):
+    def _load_build(self):
         spec = importlib.util.spec_from_file_location('cloud_build', ROOT / 'cloud' / 'build.py')
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
+        return build
+
+    def test_the_build_copies_the_sources_unchanged(self):
+        build = self._load_build()
         with tempfile.TemporaryDirectory() as tmp:
             files = build.build(Path(tmp) / 'out')
             self.assertEqual(files, ['engine/__init__.py', 'engine/cloud_pen.py', 'engine/pen.py', 'entry.py', 'server.py'])
             for source, target in build.FILES.items():
                 self.assertEqual((ROOT / source).read_bytes(), (Path(tmp) / 'out' / target).read_bytes())
 
+    def test_the_build_store_flag_bundles_only_that_file_and_refuses_others(self):
+        build = self._load_build()
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir = Path(tmp) / 'src'
+            src_dir.mkdir()
+            store_file = src_dir / 'my_store.py'
+            store_file.write_text('class MyStore:\n    pass\n', encoding='utf-8')
+            sibling = src_dir / 'secret_sibling.py'
+            sibling.write_text('SECRET = 1\n', encoding='utf-8')
+
+            out = Path(tmp) / 'out'
+            files = build.build(out, store=store_file)
+            self.assertEqual(files, ['engine/__init__.py', 'engine/cloud_pen.py', 'engine/pen.py',
+                                     'entry.py', 'my_store.py', 'server.py'])
+            self.assertEqual((out / 'my_store.py').read_bytes(), store_file.read_bytes())
+            self.assertFalse((out / 'secret_sibling.py').exists())
+
+            # Refusals: directory, missing file, symlink, non-.py, bad identifier, built-in names.
+            link = src_dir / 'link_store.py'
+            link.symlink_to(store_file)
+            txt = src_dir / 'store.txt'
+            txt.write_text('hi', encoding='utf-8')
+            bad_ident = src_dir / 'bad-store.py'
+            bad_ident.write_text('x = 1\n', encoding='utf-8')
+            reserved = []
+            for name in ('entry.py', 'server.py', 'engine.py'):
+                p = src_dir / name
+                p.write_text('x = 1\n', encoding='utf-8')
+                reserved.append(p)
+
+            for bad in (src_dir, src_dir / 'missing.py', link, txt, bad_ident, *reserved):
+                with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                    build.build(out, store=bad)
+            # Refusal: --store inside the resolved output folder must fail before clearing out.
+            with self.assertRaises(SystemExit):
+                build.build(out, store=out / 'my_store.py')
+            nested = out / 'engine' / 'nested_store.py'
+            nested.write_text('class Nested:\n    pass\n', encoding='utf-8')
+            with self.assertRaises(SystemExit):
+                build.build(out, store=nested)
+            # An existing valid build folder is left intact when --store is refused.
+            self.assertTrue((out / 'my_store.py').is_file())
+            self.assertTrue(nested.is_file())
+
+            # CLI --store works too.
+            out_cli = Path(tmp) / 'out-cli'
+            with mock.patch('builtins.print'):
+                build.main([str(out_cli), '--store', str(store_file)])
+            self.assertTrue((out_cli / 'my_store.py').is_file())
+
     def test_the_build_refuses_a_folder_it_did_not_make(self):
-        spec = importlib.util.spec_from_file_location('cloud_build', ROOT / 'cloud' / 'build.py')
-        build = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(build)
+        build = self._load_build()
         with tempfile.TemporaryDirectory() as tmp:
             keep = Path(tmp) / 'precious.txt'
             keep.write_text('mine')
@@ -600,9 +1131,7 @@ class BuildTests(unittest.TestCase):
             build.build(out)    # its own folder is replaced
 
     def test_the_build_refuses_a_link_even_when_it_points_at_an_empty_or_marked_folder(self):
-        spec = importlib.util.spec_from_file_location('cloud_build', ROOT / 'cloud' / 'build.py')
-        build = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(build)
+        build = self._load_build()
         with tempfile.TemporaryDirectory() as tmp:
             empty, marked = Path(tmp) / 'empty', Path(tmp) / 'marked'
             empty.mkdir()

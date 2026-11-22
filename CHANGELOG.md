@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Hosted store seam for the cloud Worker (`docs/cloud.md`, `docs/your-own-store.md`): set `SCRIPTORIUM_STORE = "module:Class"` to run Scriptorium's cloud Worker in front of your own database or API instead of the built-in Cloudflare Durable Object store. `cloud/build.py --store FILE` bundles one custom store module into the Worker folder (refusing symlinks, folders and built-in filenames). The class is constructed with the Worker `env` and checked against the v3 `PenStore` contract at start; leaving `SCRIPTORIUM_STORE` unset keeps the Durable Object store unchanged.
+
+Retry safety with a custom cloud store: a custom store may implement `mutate(request_id, fingerprint, apply)` to commit writes and `X-Request-Id` replay records atomically on its own backend. Without `mutate()`, the Worker refuses `X-Request-Id` on writes with HTTP 400 rather than pretending writes are retry-safe.
+
+Current-entry-only stores: a store may declare `keeps_history = False` when its backend replaces on edit and removes on delete instead of keeping version history. `journal_history` is never listed or callable (and `SCRIPTORIUM_HISTORY=on` refuses to start with it), `journal_read` never offers older versions, and `history()` is not required. Default stores keep version history and set-aside deletes unchanged.
+
 ## 1.8.0
 
 One journal toolset. The tools are now `journals`, `journal_write`, `journal_edit`, `journal_read`, `journal_list` and `journal_delete`, so "journal this" maps to a tool named for it. The old `pen_*` names still work when called with the same rules; they are not listed. The `pen-writing` skill is now `journal-writing` and starts on "journal this", "journal it" and "write in your journal".

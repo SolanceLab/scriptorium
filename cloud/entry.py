@@ -7,6 +7,7 @@ The logic sits in plain functions; only the two classes at the bottom need the C
 """
 import hashlib
 import hmac
+import importlib
 import json
 import re
 import time
@@ -14,7 +15,7 @@ import unicodedata
 
 import server
 from engine.cloud_pen import DurableObjectSql, SqlPenStore
-from engine.pen import validate_writer
+from engine.pen import PEN_CONTRACT_VERSION, RequestIdConflict, validate_writer
 
 try:
     from workers import DurableObject, Response, WorkerEntrypoint
@@ -25,10 +26,12 @@ except ImportError:  # plain Python: the logic below is importable and testable 
 KEY_ENV, AGENTS_ENV, TZ_ENV = "SCRIPTORIUM_MCP_KEY", "SCRIPTORIUM_AGENTS", "SCRIPTORIUM_PEN_TZ"
 RETRY_TTL = 24 * 60 * 60
 PEN_NAMES = {tool["name"] for tool in server.PEN_TOOLS}
+CONFLICT_MESSAGE = "this X-Request-Id was already used with a different request"
 CHAT_NAMES = {tool["name"] for tool in server.TOOLS}
 MAX_REQUEST_ID = 200
 WRITE_NAMES = ("journal_write", "journal_edit", "journal_delete", "pen_write", "pen_edit", "pen_delete")
 PEN_OBJECT = "pen"    # the one Durable Object of this deployment; keys only admit a request and name its agents
+STORE_ENV = "SCRIPTORIUM_STORE"
 MAX_SAVED = 1_000_000    # bytes of one answer kept for a retry; a Durable Object row holds at most 2 MB
 _REQUESTS = ("CREATE TABLE IF NOT EXISTS cloud_requests (rid TEXT PRIMARY KEY, writer TEXT NOT NULL, hash TEXT NOT NULL, "
              "created_at REAL NOT NULL, response TEXT NOT NULL)")
@@ -127,6 +130,19 @@ def cloud_handle(msg, agents, **context):
     return answer
 
 
+async def cloud_handle_async(msg, agents, **context):
+    """Async counterpart to cloud_handle() for stores with async methods."""
+    method = msg.get("method") if isinstance(msg, dict) else None
+    params = msg.get("params") if isinstance(msg, dict) else None
+    if method == "tools/call" and isinstance(params, dict) and isinstance(params.get("name"), str) \
+            and params["name"] in CHAT_NAMES and msg.get("id") is not None:
+        return _error(msg["id"], -32602, f"unknown tool: {params['name']}")
+    answer = await server.handle_async(msg, agents, **context)
+    if method == "tools/list" and isinstance(answer, dict) and "result" in answer:
+        answer["result"]["tools"] = [t for t in answer["result"]["tools"] if t["name"] not in CHAT_NAMES]
+    return answer
+
+
 def _failed(answer):
     return "error" in answer or bool(answer.get("result", {}).get("isError"))
 
@@ -156,19 +172,66 @@ def _request_rpc_id(body_text):
         return None
 
 
-def serve(store, body_text, agents, request_id="", *, surface=None, policy=None, fields=None, history=False):
-    """Handle an admitted request, committing each retryable write and its reply together."""
+def load_store(ref, env, *, fields=None, history=False):
+    """Import and construct SCRIPTORIUM_STORE = 'module:Class' with the Worker env, then check the v3 PenStore contract."""
+    if not isinstance(ref, str) or ":" not in ref:
+        raise ValueError(f"invalid {STORE_ENV}: must be module:Class")
+    mod, _, attr = ref.partition(":")
+    if not mod or not attr or ":" in attr or any(c.isspace() for c in ref):
+        raise ValueError(f"invalid {STORE_ENV}: must be module:Class")
+    try:
+        cls = getattr(importlib.import_module(mod), attr)
+    except Exception as e:
+        # Never forward import exception text to callers; it may contain module internals or config.
+        raise ValueError(f"invalid {STORE_ENV}: could not load store") from e
+    if not callable(cls):
+        raise ValueError(f"invalid {STORE_ENV}: must name a class or callable taking env")
+    try:
+        store = cls(env)
+    except Exception as e:
+        # Never forward init exception text to callers; it may contain backend URLs or credentials.
+        raise ValueError(f"invalid {STORE_ENV}: store failed to initialize") from e
+    try:
+        return server.check_store(store, min_version=PEN_CONTRACT_VERSION, fields=fields,
+                                  history=history, allow_async=True)
+    except ValueError as e:
+        raise ValueError(f"invalid {STORE_ENV}: {e}") from e
+
+
+def _parse_serve_body(body_text):
+    """Parse and size-check a JSON-RPC request body -> (error_response, None) or (None, body)."""
     size = len(body_text.encode("utf-8"))
     if size > server.MAX_BODY:
         # echo the id when the body is only a little too large; never parse a huge one just to find it
         rid = _request_rpc_id(body_text) if size <= 2 * server.MAX_BODY else None
-        return 413, json.dumps(_error(rid, -32600, "request too large"))
+        return (413, json.dumps(_error(rid, -32600, "request too large"))), None
     try:
         body = json.loads(body_text)
     except ValueError:
-        return 400, json.dumps(_error(None, -32700, "parse error"))
+        return (400, json.dumps(_error(None, -32700, "parse error"))), None
     if isinstance(body, list):
-        return 400, json.dumps(_error(None, -32600, "batches are not supported"))
+        return (400, json.dumps(_error(None, -32600, "batches are not supported"))), None
+    return None, body
+
+
+def _fingerprint(params, args, actor, surface):
+    fields = {"name": params["name"], "arguments": args, "agent": actor}
+    if surface is not None:
+        fields["surface"] = surface
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _scoped_request_id(writer, request_id):
+    """Scope a custom store's retry key to (writer, X-Request-Id) so writers never collide or probe each other."""
+    return json.dumps([writer, request_id], separators=(",", ":"))
+
+
+def serve(store, body_text, agents, request_id="", *, surface=None, policy=None, fields=None, history=False):
+    """Handle an admitted request, committing each retryable write and its reply together."""
+    err, body = _parse_serve_body(body_text)
+    if err is not None:
+        return err
     context = dict(store=store, surface=surface, policy=policy or (frozenset(agents or ()), {}, {}),
                    fields=fields or {}, history=bool(history))
     params = _write_call(body)
@@ -178,14 +241,48 @@ def serve(store, body_text, agents, request_id="", *, surface=None, policy=None,
     args = params.get("arguments", {})
     named = args.get("agent") if isinstance(args, dict) else None
     writer = agents[0] if agents and len(agents) == 1 else named
-    def fingerprint(actor):
-        fields = {"name": params["name"], "arguments": args, "agent": actor}
-        if surface is not None:
-            fields["surface"] = surface
-        canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    digest = fingerprint(writer) if request_id else None
+    if not isinstance(store, SqlPenStore):
+        if not request_id:
+            return _reply(cloud_handle(body, agents, **context))
+        rid = _rpc_id(body)
+        mutate = getattr(store, "mutate", None)
+        if not callable(mutate):
+            return 400, json.dumps(_error(rid, -32600, "this store does not support X-Request-Id retries"))
+        # refuse before looking anything up, so a key cannot learn what another agent saved
+        if agents is None or (named is not None and named not in agents):
+            return 403, json.dumps(_error(rid, -32600, "this key cannot write as that agent"))
+        if not isinstance(writer, str):
+            return _reply(cloud_handle(body, agents, **context))
+        scoped_id = _scoped_request_id(writer, request_id)
+        digest = _fingerprint(params, args, writer, surface)
+        failed_answer = None
+
+        def apply():
+            nonlocal failed_answer
+            answer = cloud_handle(body, agents, **context)
+            if answer is None or _failed(answer):
+                failed_answer = answer
+                return None
+            return json.dumps(answer)
+
+        try:
+            saved = server._no_awaitable(mutate(scoped_id, digest, apply))
+        except RequestIdConflict:
+            return 409, json.dumps(_error(rid, -32600, CONFLICT_MESSAGE))
+        except ValueError as e:
+            # shortcut: keep exact-message ValueError compat for callers written before RequestIdConflict;
+            # remove once all custom stores raise RequestIdConflict. Arbitrary ValueError re-raises and never leaks.
+            if str(e) != CONFLICT_MESSAGE:
+                raise
+            return 409, json.dumps(_error(rid, -32600, CONFLICT_MESSAGE))
+        if saved is None:
+            return _reply(failed_answer)
+        answer = json.loads(saved) if isinstance(saved, str) else dict(saved)
+        answer["id"] = rid
+        return _reply(answer)
+
+    digest = _fingerprint(params, args, writer, surface) if request_id else None
     adapter = store.adapter
 
     def once():
@@ -201,7 +298,7 @@ def serve(store, body_text, agents, request_id="", *, surface=None, policy=None,
             if rows:
                 saved = rows[0]
                 if saved["hash"] != digest:
-                    return 409, json.dumps(_error(rid, -32600, "this X-Request-Id was already used with a different request"))
+                    return 409, json.dumps(_error(rid, -32600, CONFLICT_MESSAGE))
                 answer = json.loads(saved["response"])
                 answer["id"] = rid
                 return _reply(answer)
@@ -216,6 +313,69 @@ def serve(store, body_text, agents, request_id="", *, surface=None, policy=None,
 
     store.ensure_ready()
     return adapter.transaction(once)
+
+
+async def serve_async(store, body_text, agents, request_id="", *, surface=None, policy=None, fields=None, history=False):
+    """Async counterpart to serve() for custom stores whose methods (and optional mutate) may be async."""
+    if isinstance(store, SqlPenStore):
+        return serve(store, body_text, agents, request_id, surface=surface, policy=policy, fields=fields, history=history)
+    err, body = _parse_serve_body(body_text)
+    if err is not None:
+        return err
+    context = dict(store=store, surface=surface, policy=policy or (frozenset(agents or ()), {}, {}),
+                   fields=fields or {}, history=bool(history))
+    params = _write_call(body)
+    if params is None or not request_id:
+        return _reply(await cloud_handle_async(body, agents, **context))
+
+    args = params.get("arguments", {})
+    named = args.get("agent") if isinstance(args, dict) else None
+    writer = agents[0] if agents and len(agents) == 1 else named
+    rid = _rpc_id(body)
+    mutate = getattr(store, "mutate", None)
+    if not callable(mutate):
+        return 400, json.dumps(_error(rid, -32600, "this store does not support X-Request-Id retries"))
+    # refuse before looking anything up, so a key cannot learn what another agent saved
+    if agents is None or (named is not None and named not in agents):
+        return 403, json.dumps(_error(rid, -32600, "this key cannot write as that agent"))
+    if not isinstance(writer, str):
+        return _reply(await cloud_handle_async(body, agents, **context))
+    scoped_id = _scoped_request_id(writer, request_id)
+    digest = _fingerprint(params, args, writer, surface)
+    failed_answer = None
+
+    if server._is_async_callable(mutate):
+        async def apply():
+            nonlocal failed_answer
+            answer = await cloud_handle_async(body, agents, **context)
+            if answer is None or _failed(answer):
+                failed_answer = answer
+                return None
+            return json.dumps(answer)
+    else:
+        def apply():
+            nonlocal failed_answer
+            answer = cloud_handle(body, agents, **context)
+            if answer is None or _failed(answer):
+                failed_answer = answer
+                return None
+            return json.dumps(answer)
+
+    try:
+        saved = await server._maybe_await(mutate(scoped_id, digest, apply))
+    except RequestIdConflict:
+        return 409, json.dumps(_error(rid, -32600, CONFLICT_MESSAGE))
+    except ValueError as e:
+        # shortcut: keep exact-message ValueError compat for callers written before RequestIdConflict;
+        # remove once all custom stores raise RequestIdConflict. Arbitrary ValueError re-raises and never leaks.
+        if str(e) != CONFLICT_MESSAGE:
+            raise
+        return 409, json.dumps(_error(rid, -32600, CONFLICT_MESSAGE))
+    if saved is None:
+        return _reply(failed_answer)
+    answer = json.loads(saved) if isinstance(saved, str) else dict(saved)
+    answer["id"] = rid
+    return _reply(answer)
 
 
 class PenObject(DurableObject):
@@ -250,11 +410,27 @@ class Default(WorkerEntrypoint):
         if refused:
             return _plain(refused, found)
         agents, surface, (configured, silo, reads), fields, history = found
-        context = json.dumps([agents, surface, [sorted(configured), silo, reads], fields, history])
+        store = None
+        store_ref = env_get(STORE_ENV)
+        if store_ref is not None:
+            try:
+                store = load_store(store_ref, self.env, fields=fields, history=history)
+            except ValueError as e:
+                return _plain(503, str(e))
         body = await request.text()
+        request_id = request.headers.get("x-request-id") or ""
+        if store is not None:
+            try:
+                status, text = await serve_async(store, body, agents, request_id, surface=surface,
+                                                 policy=(configured, silo, reads), fields=fields, history=history)
+            except Exception:
+                status, text = 500, json.dumps(_error(_request_rpc_id(body), -32603, "the pen could not answer"))
+            if status == 202:
+                return Response(None, status=202)
+            return Response(text, status=status, headers={"content-type": "application/json"})
+        context = json.dumps([agents, surface, [sorted(configured), silo, reads], fields, history])
         stub = self.env.PEN.getByName(PEN_OBJECT)
-        out = json.loads(await stub.call(body, context,
-                                    request.headers.get("x-request-id") or ""))
+        out = json.loads(await stub.call(body, context, request_id))
         if out["status"] == 202:
             return Response(None, status=202)
         return Response(out["text"], status=out["status"], headers={"content-type": "application/json"})

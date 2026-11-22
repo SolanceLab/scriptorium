@@ -153,8 +153,14 @@ def snapshot_parts(snapshot):
     return entries, metadata
 
 
+class RequestIdConflict(Exception):
+    """Raised by a custom store's mutate() when an X-Request-Id is reused with a different request."""
+
+
 class PenStore:
     """Hand-written record store contract; implementations scope every operation to writer."""
+    keeps_history = True
+
     def collections(self, writer, *, visible=None): raise NotImplementedError
     def write(self, writer, collection, body, title=None, pinned=False, by_day=None, *, surface=None, fields=None): raise NotImplementedError
     def edit(self, writer, id, based_on, body=None, title=None, pinned=None, *, surface=None, fields=None): raise NotImplementedError

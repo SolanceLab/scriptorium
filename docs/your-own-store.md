@@ -55,3 +55,44 @@ For write and edit, `fields` is passed only when there is something to store: a 
 `export_snapshot(writer)` returns `{"version": 1, "collections": {"notebook": "pool"}, "entries": [...]}`, with each collection's stored default and all the entry records from the same read. `import_snapshot(writer, snapshot)` validates the metadata and installs it before entries. A retry accepts identical metadata and entries already present. The supplied `PenStore.import_snapshot` implements this via `import_pen(writer, records, metadata=...)`. The transfer command verifies the metadata and all entries after import. The source and destination settings are separate from the snapshot.
 
 Each version dictionary has `id`, `collection`, `writer`, `body` (text), `created` and `edited` (ISO 8601 timestamps with offsets), `pinned` and `by_day` (Booleans), and `version` (integer). It may also have `title` and `surface` (text) and additional JSON-compatible header fields. The writer, id, collection, creation timestamp, and day grouping are preserved in every version. The transfer command compares the destination snapshot with the source after import, including version order and all fields.
+
+### Cloud store seam (`SCRIPTORIUM_STORE`)
+
+To run the Cloudflare Worker (`cloud/entry.py`) in front of your own database or API instead of the built-in Durable Object `SqlPenStore`:
+
+1. Bundle one store module into the Worker folder with `python3 cloud/build.py --store path/to/my_store.py`. The build copies only that single `.py` file and refuses symlinks, directories, invalid module names, files inside the output folder, or filenames that collide with built-in Worker files (`entry.py`, `server.py`, `engine.py`).
+2. Set `SCRIPTORIUM_STORE = "my_store:MyStore"` in the Worker environment. Leaving `SCRIPTORIUM_STORE` unset keeps the default Durable Object store.
+3. After authenticating the request, the Worker constructs `MyStore(env)` with the Worker `env` (so your store can read its own secrets and variables) and checks the v3 `PenStore` contract (`contract_version = 3` and the required methods). Store methods on the Worker may be `async def` (for example, when calling `fetch()` against Supabase or an HTTP API). An invalid store or failed initialization returns HTTP 503 with a generic error (initialization exception details are not exposed to callers).
+
+### Retry safety on custom cloud stores (`mutate`)
+
+The built-in Durable Object store stores `X-Request-Id` replays in its own SQLite transaction. A custom cloud store may implement an optional method (sync `def` or `async def`; required to be `async def` when any store method is `async def`) to provide atomic retry safety on its own backend:
+
+```python
+async def mutate(self, request_id, fingerprint, apply):
+    ...
+```
+
+- `request_id` is an opaque string scoped by the Worker to `(writer, X-Request-Id)` so two writers using the same `X-Request-Id` header never collide or learn about each other's retries.
+- `fingerprint` is a SHA-256 hex digest of the canonical write request (`name`, `arguments`, acting `agent`, and `surface` when set).
+- `apply` is a zero-argument callable (an `async def` callable when `mutate` is `async def`, so call `await apply()`) that runs the write and returns the JSON reply string on success, or `None` when the write failed (so failures are never saved).
+
+Inside `mutate`, check the writer-scoped `request_id` atomically with the write:
+
+- If `request_id` was already saved with the same `fingerprint`, return the saved reply string without calling `apply()`. The Worker rewrites the JSON-RPC `id` to match the current request.
+- If `request_id` was already saved with a different `fingerprint`, raise `RequestIdConflict` (from `engine.pen`; the Worker returns HTTP 409 with a fixed public message and never forwards exception text).
+- Otherwise call `reply = apply()` (or `reply = await apply()`). If `reply` is not `None`, save `(request_id, fingerprint, reply)` atomically with the write and return `reply`. If `reply` is `None`, save nothing and return `None`.
+
+If a custom store does not implement `mutate`, the Worker refuses `X-Request-Id` on write calls with HTTP 400 and a plain error message rather than pretending writes are retry-safe.
+
+### Current-entry-only stores (`keeps_history = False`)
+
+By default (`keeps_history = True`), a store keeps every version of an entry and moves deleted entries aside for recovery. A store backed by a table or API that keeps only the current row may declare `keeps_history = False` on the class (or instance):
+
+- `journal_history` (and `pen_history`) is never listed or callable. Setting `SCRIPTORIUM_HISTORY=on` with a `keeps_history = False` store refuses to start (both locally and in the cloud).
+- `journal_read` never takes a `version` argument and never returns an older version.
+- `edit` replaces the entry in place (returning the new version number) rather than preserving earlier versions.
+- `delete` removes the entry permanently (no set-aside).
+- `history()` does not need to be implemented when `keeps_history = False`.
+
+Default stores (`keeps_history = True`, or attribute omitted) keep today's versioned and set-aside behaviour unchanged.

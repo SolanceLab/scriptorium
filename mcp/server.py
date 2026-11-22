@@ -19,6 +19,7 @@ import argparse
 import copy
 import hmac
 import importlib
+import inspect
 import json
 import os
 import re
@@ -205,11 +206,78 @@ JOURNAL_METHODS = {"journals": ("collections", True), "journal_write": ("write",
 STORE_METHODS = tuple(method for method, _ in JOURNAL_METHODS.values())    # what a PenStore must provide
 
 
-def _journal_tools(history):
+def _is_async_callable(fn):
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None))
+
+
+def _no_awaitable(value):
+    if inspect.isawaitable(value):
+        if inspect.iscoroutine(value):
+            value.close()
+        raise TypeError("async pen store requires an async server")
+    return value
+
+
+async def _maybe_await(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+def check_store(store, *, min_version=None, fields=None, history=False, allow_async=False):
+    """Validate that a PenStore implements the required methods, contract version, and history mode."""
+    from engine.pen import PEN_CONTRACT_VERSION, PenStore
+    if min_version is None:
+        min_version = PEN_CONTRACT_VERSION
+    keeps_history = getattr(store, "keeps_history", True)
+    if type(keeps_history) is not bool:
+        raise ValueError("pen store keeps_history must be a boolean")
+    if not keeps_history and history:
+        raise ValueError(f"{HISTORY_ENV}=on cannot be used with a store that does not keep history")
+    required = STORE_METHODS if keeps_history else tuple(m for m in STORE_METHODS if m != "history")
+    has_async = False
+    for name in required:
+        method = getattr(store, name, None)
+        if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, name):
+            raise ValueError(f"pen store lacks required method: {name}")
+        if _is_async_callable(method):
+            if not allow_async:
+                raise ValueError(f"pen store method {name} cannot be async in this server")
+            has_async = True
+    mutate = getattr(store, "mutate", None)
+    if has_async and callable(mutate) and not _is_async_callable(mutate):
+        raise ValueError("pen store with async methods must declare async mutate")
+    version = getattr(store, "contract_version", None)
+    if type(version) is not int or version < min_version or version > PEN_CONTRACT_VERSION:
+        raise ValueError(f"pen store must declare contract_version = {PEN_CONTRACT_VERSION}")
+    if version < PEN_CONTRACT_VERSION and fields and any(fields.values()):
+        raise ValueError(f"{FIELDS_ENV} needs a pen store that declares contract_version = {PEN_CONTRACT_VERSION}; "
+                         f"this one declares {version}")
+    return store
+
+
+def _store_keeps_history(store):
+    pen = Config.pen if store is None else store
+    return getattr(pen, "keeps_history", True) is not False
+
+
+def _effective_history(store, history):
+    wanted = Config.history if history is None else history
+    return bool(wanted) and _store_keeps_history(store)
+
+
+def _journal_tools(history, keeps_history=True):
     """The listed journal tools. With history off there is no journal_history and journal_read has no version."""
+    history = bool(history) and bool(keeps_history)
     read = {"id": _TEXT, "of": _OF}
     if history:
         read["version"] = _POSITIVE
+    if history:
+        read_desc = "Read the current version of a journal entry, or an older one with version."
+    elif keeps_history:
+        read_desc = "Read the current version of a journal entry." + _HISTORY_HIDDEN
+    else:
+        read_desc = "Read a journal entry. This store keeps only the current version."
+    delete_desc = ("Move a journal entry and its history aside for recovery."
+                   if keeps_history else "Delete a journal entry from the store.")
     rows = [
         ("journals", "List your journals (each with the fields it declares) and the counts of active entries. "
                      "Use of for another agent's pooled journals. " + _JOURNAL, {"of": _OF}, []),
@@ -223,14 +291,13 @@ def _journal_tools(history):
          {"id": _TEXT, "based_on": _POSITIVE, "body": _TEXT, "title": _TEXT, "pinned": _BOOL,
           "fields": dict(_OBJECT, description="Fields to set or change; null clears an optional field.")},
          ["id", "based_on"]),
-        ("journal_read", "Read the current version of a journal entry" + (", or an older one with version." if history else "." + _HISTORY_HIDDEN),
-         read, ["id"]),
+        ("journal_read", read_desc, read, ["id"]),
         ("journal_list", "List active journal entries in one journal, newest first.",
          {"collection": dict(_TEXT, description="The journal's name."), "pinned_only": _BOOL, "day": _TEXT,
           "limit": _POSITIVE, "of": _OF, "surface": _SURFACE}, ["collection"]),
         ("journal_history", "Read all versions of a journal entry, oldest first. Each older version is marked "
                             "replaced_on and current: false.", {"id": _TEXT, "of": _OF}, ["id"]),
-        ("journal_delete", "Move a journal entry and its history aside for recovery.", {"id": _TEXT}, ["id"]),
+        ("journal_delete", delete_desc, {"id": _TEXT}, ["id"]),
     ]
     return [{"name": name, "description": description,
              "inputSchema": {"type": "object", "properties": properties, "required": required,
@@ -251,8 +318,8 @@ def _with_agent(tool, agents):
     return tool
 
 
-def _shared_pen_tools(agents, history=False):
-    return [_with_agent(t, agents) for t in _journal_tools(history)]
+def _shared_pen_tools(agents, history=False, keeps_history=True):
+    return [_with_agent(t, agents) for t in _journal_tools(history, keeps_history=keeps_history)]
 
 
 class Config:
@@ -381,37 +448,38 @@ def _older(record, newer):
     return dict(record, replaced_on=newer["edited"], current=False)
 
 
-def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
-    """One journal tool call (a listed name or an old pen_* alias) -> (text, is_error)."""
+def _prepare_pen_call(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
+    """Validate and resolve a journal tool call -> (error_text, None) or (None, prepared)."""
     name = PEN_ALIASES.get(name, name)
     fields = Config.fields if fields is None else fields
-    history = Config.history if history is None else history
+    keeps_history = _store_keeps_history(store)
+    history = _effective_history(store, history)
     if agents is None:
-        return "no writer is assigned to this key", True
+        return "no writer is assigned to this key", None
     if len(agents) == 1:
         writer = agents[0]
     else:
         args = dict(args)
         if "agent" not in args:
-            return "agent is required: one of " + ", ".join(agents), True
+            return "agent is required: one of " + ", ".join(agents), None
         agent = args.pop("agent")
         if not isinstance(agent, str) or agent not in agents:
-            return "agent must be one of " + ", ".join(agents), True
+            return "agent must be one of " + ", ".join(agents), None
         writer = agent
     if name == "journal_history" and not history:
-        return "history is not offered", True
-    schema = {t["name"]: t["inputSchema"] for t in _journal_tools(history)}[name]
+        return "history is not offered", None
+    schema = {t["name"]: t["inputSchema"] for t in _journal_tools(history, keeps_history=keeps_history)}[name]
     properties = schema["properties"]
     if set(args) - properties.keys():
-        return "unknown argument", True
+        return "unknown argument", None
     if set(schema["required"]) - args.keys():
-        return "missing required argument", True
+        return "missing required argument", None
     for argument, value in args.items():
         prop = properties[argument]
         if type(value) is not _PEN_ARGUMENT_TYPES[prop["type"]] or (
             "minimum" in prop and value < prop["minimum"]
         ):
-            return f"invalid {argument}", True
+            return f"invalid {argument}", None
     args = dict(args)
     owner = writer
     method_name, is_read = JOURNAL_METHODS[name]
@@ -420,45 +488,61 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, field
         if owner != writer:
             configured, silo, reads = policy or Config.policy
             if owner not in configured:
-                return "unknown agent", True
+                return "unknown agent", None
             if reads.get(writer) == "own":
-                return "this agent can only read its own notebooks", True
+                return "this agent can only read its own notebooks", None
             args["visible"] = lambda collection, default: pooled(silo, owner, collection, default)
     elif name in ("journal_write", "journal_edit"):
         args["surface"] = surface
+    return None, (name, args, writer, owner, method_name, is_read, fields)
+
+
+def _format_pen_result(name, result, fields, owner, writer):
+    if name == "journal_write":
+        result = {"id": result}
+    elif name == "journal_edit":
+        result = {"version": result}
+    elif name == "journal_delete":
+        result = {"ok": True}
+    elif name == "journals":
+        result = _with_declared_fields(result, fields, owner, owner == writer)
+    elif name == "journal_history":
+        result = [_older(r, result[i + 1]) if i + 1 < len(result) else r for i, r in enumerate(result)]
+    return json.dumps(result, ensure_ascii=False)
+
+
+def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
+    """One journal tool call (a listed name or an old pen_* alias) -> (text, is_error)."""
+    err, prepared = _prepare_pen_call(name, args, agents, surface=surface, policy=policy,
+                                      store=store, fields=fields, history=history)
+    if err is not None:
+        return err, True
+    name, args, writer, owner, method_name, is_read, fields = prepared
     if not _one_write.acquire(blocking=False):
         return "another write is running; try again when it finishes", True
     try:
         pen = Config.pen if store is None else store
         if "fields" in args or name == "journal_write":
             from engine.pen import check_fields
-            journal = args.get("collection") if name == "journal_write" else pen.read(owner, args["id"])["collection"]
+            journal = (args.get("collection") if name == "journal_write"
+                       else _no_awaitable(pen.read(owner, args["id"]))["collection"])
             declared = declared_fields(fields, owner, journal)
             if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
                 check_fields(declared, args.get("fields", {}), name == "journal_write")
             if not args.get("fields"):
                 args.pop("fields", None)    # stores take `fields` only when there is something to store
         method = getattr(pen, method_name)
-        result = method(owner, **args)
-        if name == "journal_write":
-            result = {"id": result}
-        elif name == "journal_edit":
-            result = {"version": result}
-        elif name == "journal_delete":
-            result = {"ok": True}
-        elif name == "journals":
-            result = _with_declared_fields(result, fields, owner, owner == writer)
-        elif name == "journal_history":
-            result = [_older(r, result[i + 1]) if i + 1 < len(result) else r for i, r in enumerate(result)]
-        elif name == "journal_read" and args.get("version"):
+        result = _no_awaitable(method(owner, **args))
+        if name == "journal_read" and args.get("version"):
             try:
-                result = _older(result, method(owner, args["id"], args["version"] + 1,
-                                               **({"visible": args["visible"]} if "visible" in args else {})))
+                newer = _no_awaitable(method(owner, args["id"], args["version"] + 1,
+                                             **({"visible": args["visible"]} if "visible" in args else {})))
+                result = _older(result, newer)
             except ValueError as e:
                 if str(e) != 'version not found':
                     raise    # a damaged newer version is an error, never passed off as 'current'
                 # no newer version: this one is current
-        return json.dumps(result, ensure_ascii=False), False
+        return _format_pen_result(name, result, fields, owner, writer), False
     except OSError as e:
         if store is not None and not is_read:
             # Cloud writes share a transaction with the retry record. Let it roll back.
@@ -468,6 +552,44 @@ def pen_tool(name, args, agents, *, surface=None, policy=None, store=None, field
         return str(e), True
     finally:
         _one_write.release()
+
+
+async def pen_tool_async(name, args, agents, *, surface=None, policy=None, store=None, fields=None, history=None):
+    """Async journal tool call for stores whose methods may be async (e.g. fetch() on Cloudflare Workers)."""
+    err, prepared = _prepare_pen_call(name, args, agents, surface=surface, policy=policy,
+                                      store=store, fields=fields, history=history)
+    if err is not None:
+        return err, True
+    name, args, writer, owner, method_name, is_read, fields = prepared
+    try:
+        pen = Config.pen if store is None else store
+        if "fields" in args or name == "journal_write":
+            from engine.pen import check_fields
+            journal = (args.get("collection") if name == "journal_write"
+                       else (await _maybe_await(pen.read(owner, args["id"])))["collection"])
+            declared = declared_fields(fields, owner, journal)
+            if "fields" in args or declared:    # an omitted `fields` is still checked against required ones
+                check_fields(declared, args.get("fields", {}), name == "journal_write")
+            if not args.get("fields"):
+                args.pop("fields", None)    # stores take `fields` only when there is something to store
+        method = getattr(pen, method_name)
+        result = await _maybe_await(method(owner, **args))
+        if name == "journal_read" and args.get("version"):
+            try:
+                newer = await _maybe_await(method(owner, args["id"], args["version"] + 1,
+                                                  **({"visible": args["visible"]} if "visible" in args else {})))
+                result = _older(result, newer)
+            except ValueError as e:
+                if str(e) != 'version not found':
+                    raise    # a damaged newer version is an error, never passed off as 'current'
+                # no newer version: this one is current
+        return _format_pen_result(name, result, fields, owner, writer), False
+    except OSError as e:
+        if store is not None and not is_read:
+            raise
+        return str(e), True
+    except ValueError as e:
+        return str(e), True
 
 
 def _with_declared_fields(journals, fields, owner, own):
@@ -486,10 +608,11 @@ def _with_declared_fields(journals, fields, owner, own):
     return result
 
 
-def _listed_pen_tools(agents, history):
+def _listed_pen_tools(agents, history, keeps_history=True):
     if agents and len(agents) > 1:
-        return Config.shared_tools.get((agents, history)) or _shared_pen_tools(agents, history)
-    return _journal_tools(history)
+        cached = Config.shared_tools.get((agents, history)) if keeps_history == _store_keeps_history(None) else None
+        return cached or _shared_pen_tools(agents, history, keeps_history=keeps_history)
+    return _journal_tools(history, keeps_history=keeps_history)
 
 
 def _callable_names(history):
@@ -499,39 +622,63 @@ def _callable_names(history):
     return {t["name"] for t in TOOLS} | journal | {old for old, new in PEN_ALIASES.items() if new in journal}
 
 
+def _dispatch_meta(msg, agents, *, store=None, history=None):
+    """Handle JSON-RPC framing and non-tool methods, or return ('call', (rid, name, args, effective_history))."""
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
+        return "done", _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
+    rid, method = msg.get("id"), msg["method"]
+    params = msg["params"] if "params" in msg else {}     # only an absent member defaults; null, [] and 0 are refused
+    if rid is None:
+        return "done", None
+    if not isinstance(params, dict):
+        return "done", _error(rid, -32602, "params must be an object")
+    if method == "initialize":
+        asked = params.get("protocolVersion")
+        return "done", _result(rid, {"protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
+                                     "capabilities": {"tools": {}}, "serverInfo": SERVER_INFO})
+    if method == "ping":
+        return "done", _result(rid, {})
+    effective_history = _effective_history(store, history)
+    keeps_history = _store_keeps_history(store)
+    if method == "tools/list":
+        return "done", _result(rid, {"tools": TOOLS + _listed_pen_tools(agents, effective_history, keeps_history=keeps_history)})
+    if method == "tools/call":
+        name = params.get("name")
+        if not isinstance(name, str) or name not in _callable_names(effective_history):
+            return "done", _error(rid, -32602, f"unknown tool: {name}")
+        args = params["arguments"] if "arguments" in params else {}
+        if not isinstance(args, dict):
+            return "done", _error(rid, -32602, "arguments must be an object")
+        return "call", (rid, name, args, effective_history)
+    return "done", _error(rid, -32601, f"method not found: {method}")
+
+
 def handle(msg, writer=None, *, surface=None, policy=None, store=None, fields=None, history=None):
     """One JSON-RPC message -> its response dict, or None for a notification.
 
     `writer` is what the key is bound to: None, one agent name, or a tuple of agent names."""
     agents = (writer,) if isinstance(writer, str) else (tuple(writer) if writer else None)
-    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
-        return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
-    rid, method = msg.get("id"), msg["method"]
-    params = msg["params"] if "params" in msg else {}     # only an absent member defaults; null, [] and 0 are refused
-    if rid is None:
-        return None
-    if not isinstance(params, dict):
-        return _error(rid, -32602, "params must be an object")
-    if method == "initialize":
-        asked = params.get("protocolVersion")
-        return _result(rid, {"protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
-                             "capabilities": {"tools": {}}, "serverInfo": SERVER_INFO})
-    if method == "ping":
-        return _result(rid, {})
-    if method == "tools/list":
-        return _result(rid, {"tools": TOOLS + _listed_pen_tools(agents, Config.history if history is None else history)})
-    if method == "tools/call":
-        name = params.get("name")
-        if not isinstance(name, str) or name not in _callable_names(Config.history if history is None else history):
-            return _error(rid, -32602, f"unknown tool: {name}")
-        args = params["arguments"] if "arguments" in params else {}
-        if not isinstance(args, dict):
-            return _error(rid, -32602, "arguments must be an object")
-        text, is_error = (pen_tool(name, args, agents, surface=surface, policy=policy, store=store,
-                                   fields=fields, history=history)
-                          if name in JOURNAL_METHODS or name in PEN_ALIASES else run_tool(name, args))
-        return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
-    return _error(rid, -32601, f"method not found: {method}")
+    kind, payload = _dispatch_meta(msg, agents, store=store, history=history)
+    if kind == "done":
+        return payload
+    rid, name, args, effective_history = payload
+    text, is_error = (pen_tool(name, args, agents, surface=surface, policy=policy, store=store,
+                               fields=fields, history=effective_history)
+                      if name in JOURNAL_METHODS or name in PEN_ALIASES else run_tool(name, args))
+    return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
+
+
+async def handle_async(msg, writer=None, *, surface=None, policy=None, store=None, fields=None, history=None):
+    """Async counterpart to handle() for servers whose pen store methods may be async."""
+    agents = (writer,) if isinstance(writer, str) else (tuple(writer) if writer else None)
+    kind, payload = _dispatch_meta(msg, agents, store=store, history=history)
+    if kind == "done":
+        return payload
+    rid, name, args, effective_history = payload
+    text, is_error = (await pen_tool_async(name, args, agents, surface=surface, policy=policy, store=store,
+                                           fields=fields, history=effective_history)
+                      if name in JOURNAL_METHODS or name in PEN_ALIASES else run_tool(name, args))
+    return _result(rid, {"content": [{"type": "text", "text": text}], "isError": bool(is_error)})
 
 
 def local_request(headers):
@@ -646,32 +793,21 @@ def configure(root, key, writers=None, pen_ref=None, timezone=None):
         Config.policy, Config.surfaces, Config.fields, Config.history = pen_settings(os.environ.get, writer_names.values(), references)
     except ValueError as e:
         raise SystemExit(str(e)) from e
-    Config.shared_tools = {(v, Config.history): _shared_pen_tools(v, Config.history)
-                           for v in Config.keys.values() if v is not None and len(v) > 1}
     if pen_ref:
         mod, sep, attr = pen_ref.partition(":")
         if not mod or not sep or not attr: raise SystemExit("pen store must be module:attr")
         try:
             store = getattr(importlib.import_module(mod), attr)
-            methods = list(STORE_METHODS)
-            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in methods)):
+            if isinstance(store, type) or (callable(store) and not any(hasattr(store, n) for n in STORE_METHODS)):
                 store = store()
-
-            for name in methods:
-                method = getattr(store, name, None)
-                if not callable(method) or getattr(method, "__func__", method) is getattr(PenStore, name):
-                    raise ValueError(f"pen store lacks required method: {name}")
-            version = getattr(store, "contract_version", None)
-            if version not in (2, PEN_CONTRACT_VERSION):
-                raise ValueError(f"pen store must declare contract_version = {PEN_CONTRACT_VERSION}")
-            if version < PEN_CONTRACT_VERSION and any(Config.fields.values()):
-                raise ValueError(f"{FIELDS_ENV} needs a pen store that declares contract_version = {PEN_CONTRACT_VERSION}; "
-                                 f"this one declares {version}")
-            Config.pen = store
+            Config.pen = check_store(store, min_version=2, fields=Config.fields, history=Config.history)
         except (ImportError, AttributeError, ValueError) as e: raise SystemExit(str(e))
     else:
         try: Config.pen = LocalFilesPenStore(real, timezone)
         except (ValueError, KeyError) as e: raise SystemExit("invalid pen timezone: " + str(e))
+    keeps = _store_keeps_history(Config.pen)
+    Config.shared_tools = {(v, Config.history): _shared_pen_tools(v, Config.history, keeps_history=keeps)
+                           for v in Config.keys.values() if v is not None and len(v) > 1}
 
 
 def main(argv=None):
