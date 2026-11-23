@@ -95,9 +95,10 @@
     // Grok keeps outside the tree) is the start only when exactly one node has such a parent; with more, history is missing.
     const nodeIds = new Set(nodes.map((n) => n.responseId));
     const outside = nodes.filter((n) => n.parentResponseId && !nodeIds.has(n.parentResponseId));
+    // A chat starts with the person's message, so an outside parent counts as the start only on a human turn.
     // A node with no parent is a root too: with one already there, an outside parent is a second start, not the first.
     const hasRoot = nodes.some((n) => !n.parentResponseId);
-    const parentOf = new Map(nodes.map((n) => [n.responseId, nodeIds.has(n.parentResponseId) ? n.parentResponseId : (outside.length === 1 && !hasRoot) || !n.parentResponseId ? null : "\0outside"]));
+    const parentOf = new Map(nodes.map((n) => [n.responseId, nodeIds.has(n.parentResponseId) ? n.parentResponseId : (outside.length === 1 && !hasRoot && /^(human|user)$/i.test(String(outside[0].sender || ""))) || !n.parentResponseId ? null : "\0outside"]));
     const times = new Map(resp.responses.map((x) => [x.responseId, epoch(x.createTime)]));
     const leaf = typeof resp.leaf === "string" && parentOf.has(resp.leaf) ? resp.leaf : pickLeaf(nodes, resp.rid, times);
     const inflight = Array.isArray(resp.inflight) && resp.inflight.length > 0;

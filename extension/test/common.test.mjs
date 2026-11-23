@@ -151,3 +151,9 @@ test("signed links leave every field of the saved file, written text stays as wr
   assert.ok(!out.includes("Expires"), "no expiry left anywhere");
   assert.ok(out.includes("see https://x.example/a?keep=1"), "the message text is untouched");
 });
+
+test("a title that is only a link, and links without https: carrying a login, are cleaned", async () => {
+  const out = await C.captureBlob({ site: "claude", title: "https://x.example/t?sig=SECRET1", messages: [],
+    raw: { thumb: "//user:pw2@cdn.example/a.png?sig=SECRET2", list: ["//cdn.example/b.png?Expires=SECRET3"] } }).text();
+  for (const s of ["SECRET1", "SECRET2", "SECRET3", "pw2"]) assert.ok(!out.includes(s), s);
+});

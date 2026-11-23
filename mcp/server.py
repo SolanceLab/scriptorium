@@ -444,6 +444,8 @@ def run_tool(name, args):
         child_env = os.environ.copy()
         for ref in Config.key_refs | {"SCRIPTORIUM_MCP_KEY", "MEMORY_ENTRY_MCP_KEY", "SCRIPTORIUM_WRITERS", "MEMORY_ENTRY_WRITERS", AGENTS_ENV}:
             child_env.pop(ref, None)
+        if name not in ("write_notes", "write_memories"):
+            child_env.pop("ANTHROPIC_API_KEY", None)   # only the notes writer may need the API key
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=Config.root, env=child_env)
     finally:
         _one_write.release()

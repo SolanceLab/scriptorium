@@ -252,3 +252,16 @@ test("grok: a reply whose parent is missing, beside a real root, is incomplete",
   const env = sites.grok.toEnvelope(resp, "c", AT);
   assert.equal(env.complete, false);
 });
+
+test("grok: a cut-off tree that starts with an AI reply is incomplete; chatgpt: a reply with no content is incomplete", () => {
+  const G = createRequire(import.meta.url)("../sites/grok.js");
+  const toEnv = G.toEnvelope || (G.grok && G.grok.toEnvelope);
+  const g = toEnv({ title: "t", inflight: [], rid: "a1", nodes: [{ responseId: "a1", sender: "assistant", parentResponseId: "gone" }],
+    responses: [{ responseId: "a1", sender: "assistant", message: "late reply", parentResponseId: "gone", createTime: "2026-11-23T00:00:01Z" }] }, "c", "2026-11-23T00:00:02Z");
+  assert.equal(g.complete, false);
+  const P = createRequire(import.meta.url)("../sites/chatgpt.js");
+  const toEnvP = P.toEnvelope || (P.chatgpt && P.chatgpt.toEnvelope);
+  const node = (id, parent, role, content) => ({ id, parent, message: { id, author: { role }, content, create_time: 1, recipient: "all" } });
+  const mapping = { r: { id: "r", parent: null, message: null }, u1: node("u1", "r", "user", { content_type: "text", parts: ["hi"] }), a1: node("a1", "u1", "assistant", undefined) };
+  assert.equal(toEnvP({ id: "c", title: "t", current_node: "a1", mapping }, "c", "2026-11-23T00:00:00Z").complete, false);
+});

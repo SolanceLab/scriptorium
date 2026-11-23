@@ -71,6 +71,7 @@
         messages.push(C.message("tool-" + prev, "assistant", r0.text, null, r0.items));
         branch.push("tool-" + prev); pending = [];
       }
+      if (role === "assistant" && !isObj(m.content)) { missing = true; continue; }   // a reply whose content is missing: never silently dropped
       const ps = pieces(m.content, role === "user" ? "uploaded" : "generated", role === "user" ? uploadsOf(meta) : []);
       const r = C.renderPieces(role === "assistant" ? pending.concat(ps) : ps);
       if (!r.text.trim()) continue;

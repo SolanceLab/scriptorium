@@ -119,15 +119,15 @@
   // Only values under a URL-named key (pointer, url, uri(s), href, src) are cut: message text is never touched, even when it is
   // only a link. Such a value with no spaces (full address, relative or bare path) loses its query, fragment and login.
   const URL_KEY = /(pointer|url|uris?|href|src)$/i;
-  const cut = (s) => s.replace(/[?#][\s\S]*$/, "").replace(/^(https?:\/\/)[^/]*@/i, "$1");
-  const TEXT_KEY = /^(text|message|query|title|body|content|parts)$/i;   // what was written: never altered
+  const cut = (s) => s.replace(/[?#][\s\S]*$/, "").replace(/^((?:https?:)?\/\/)[^/]*@/i, "$1");
+  const TEXT_KEY = /^(text|message|query|body|content|parts)$/i;   // what was written: never altered (a title that is only a link is cut)
   function scrub(v, key) {
     if (typeof v === "string") {
       if (key === "reason") return v.replace(/(https?:\/\/[^\s?#]*)[?#]\S*/gi, "$1");   // a failure note: any link in it loses its query
       if (typeof key === "string" && URL_KEY.test(key) && /^\S+$/.test(v)) return cut(v);
       // Any other value that is a whole web address (an attachment id, a raw list of image links) loses its query too;
       // what the person or the AI wrote (text, message) is kept exactly as written.
-      if (!(typeof key === "string" && TEXT_KEY.test(key)) && /^https?:\/\/\S+$/i.test(v)) return cut(v);
+      if (!(typeof key === "string" && TEXT_KEY.test(key)) && /^(?:https?:)?\/\/\S+$/i.test(v)) return cut(v);
       return v;
     }
     if (Array.isArray(v)) return v.map((x) => scrub(x, key));
