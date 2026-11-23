@@ -1,5 +1,5 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
-"""Import saved chats: capture files and conversations.json in, notes for only the new messages out.
+"""Import saved chats: capture files and account exports (Claude's or ChatGPT's conversations.json) in, notes for only the new messages out.
 
     python3 import_captures.py --root FOLDER [--out DIR] [--model M | --model-cmd "<command>"] [--prompt public]
 
@@ -30,6 +30,7 @@ import sys
 import time
 
 import capture_file as cf
+import chatgpt_export as gpt
 import write_notes as wn
 
 try:
@@ -38,6 +39,7 @@ except ImportError:      # shortcut: no file lock on Windows; run one import at 
     fcntl = None
 
 STATE_DIR = ".scriptorium-import"
+CHATGPT_EXPORT = "chatgpt-conversations.json"
 EXPORT = "conversations.json"
 ADOPTED = "notes exist for this chat but this importer has no record of them; move them away or remove the notes file to import it from the start"
 
@@ -74,6 +76,18 @@ def _from_claude_export(conv):
     return cid, title, [{"id": lid, "role": sender, "text": text, "created_at": at} for lid, sender, text, at in lines]
 
 
+def _export_files(root):
+    """Paths (relative to root) of the account-export files: conversations.json and chatgpt-conversations.json in
+    the root, and conversations.json one folder down (where an unzipped ChatGPT export lands)."""
+    names = [n for n in (EXPORT, CHATGPT_EXPORT) if os.path.isfile(os.path.join(root, n))]
+    for d in sorted(os.listdir(root)):
+        if d.startswith(".") or d == "notes" or not os.path.isdir(os.path.join(root, d)):
+            continue
+        if os.path.isfile(os.path.join(root, d, EXPORT)):
+            names.append(os.path.join(d, EXPORT))
+    return names
+
+
 def find_sources(root):
     """({(site, id): [source, ...]}, [problem text]) from the capture files and conversations.json in root."""
     found, problems = {}, []
@@ -91,30 +105,34 @@ def find_sources(root):
             msgs = [m for m in msgs if not m["id"] or m["id"] in keep]
         found.setdefault((cap["site"], cap["conversation_id"]), []).append(
             {"from": name, "title": cap["title"], "messages": _prepare(msgs)})
-    path = os.path.join(root, EXPORT)
-    if os.path.exists(path):
+    for rel in _export_files(root):
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
                 convs = json.load(f)
             if not isinstance(convs, list):
                 raise ValueError("not a list")
         except (OSError, ValueError) as e:
-            problems.append(f"{EXPORT}: cannot be read ({e})")
-            convs = []
+            problems.append(f"{rel}: cannot be read ({e})")
+            continue
         for conv in convs:
             if not isinstance(conv, dict):
                 continue
-            cid, title, msgs = _from_claude_export(conv)
+            if gpt.is_chatgpt(conv):                      # ChatGPT's items carry `mapping`, Claude's `chat_messages`
+                site, (cid, title, msgs) = "chatgpt", gpt.conversation_turns(conv)
+            elif isinstance(conv.get("chat_messages"), list):
+                site, (cid, title, msgs) = "claude", _from_claude_export(conv)
+            else:
+                continue
             if cid:
-                found.setdefault(("claude", cid), []).append(
-                    {"from": EXPORT, "title": title, "messages": _prepare(msgs)})
+                found.setdefault((site, cid), []).append(
+                    {"from": rel, "title": title, "messages": _prepare(msgs), "export": True})
     return found, problems
 
 
 def pick_source(sources):
     """The one source to read for a chat. shortcut: the fuller of two copies wins (a tie goes to the capture file);
     messages only the smaller copy holds show up next run as a conflict, never as silent loss."""
-    return max(sources, key=lambda s: (len(s["messages"]), s["from"] != EXPORT))
+    return max(sources, key=lambda s: (len(s["messages"]), not s.get("export")))
 
 
 def notes_name(site, cid):
