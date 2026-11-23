@@ -193,3 +193,15 @@ test("grok: the first message's parent outside the tree is the start, not missin
   assert.equal(env.complete, true, env.reason);
   assert.equal(env.messages.length, 2);
 });
+
+test("grok: an uploaded file's address comes from its metadata path, and image/jpg makes it an image", () => {
+  const G = createRequire(import.meta.url)("../sites/grok.js");
+  const toEnv = G.toEnvelope || (G.grok && G.grok.toEnvelope);
+  const resp = { title: "t", inflight: [], rid: "u1", nodes: [{ responseId: "u1", sender: "human" }],
+    responses: [{ responseId: "u1", sender: "human", message: "look", createTime: "2026-11-23T00:00:00Z", fileAttachments: ["f1"], fileUris: ["f1"],
+      fileAttachmentsMetadata: [{ fileMetadataId: "f1", fileMimeType: "image/jpg", fileName: "IMG_1.jpg", fileUri: "users/u9/f1/content" }] }] };
+  const item = toEnv(resp, "c", "2026-11-23T00:00:01Z").messages[0].attachments[0];
+  assert.equal(item.pointer, "https://assets.grok.com/users/u9/f1/content");
+  assert.equal(item.kind, "image");
+  assert.equal(item.name, "IMG_1.jpg");
+});

@@ -50,8 +50,10 @@
       const byId = meta.find((k) => isObj(k) && id && idOf(k) === id);
       const pos = isObj(meta[i]) && (!id || !idOf(meta[i])) ? meta[i] : null;   // by position only when neither side names another file
       const m = byId || pos || {};
-      const mime = m.mimeType || m.mime_type || m.mime || (isObj(a) ? a.mimeType || a.mime_type : null);
-      const uri = typeof uris[i] === "string" ? uris[i] : isObj(uris[i]) ? uris[i].url || uris[i].uri : null;
+      const mime = m.fileMimeType || m.mimeType || m.mime_type || m.mime || (isObj(a) ? a.mimeType || a.mime_type : null);
+      // The file's full path (users/<…>/<…>/content on Grok's assets host) is in its metadata; fileUris may hold only an id.
+      const uri = (typeof m.fileUri === "string" && m.fileUri) ? m.fileUri
+        : typeof uris[i] === "string" ? uris[i] : isObj(uris[i]) ? uris[i].url || uris[i].uri : null;
       out.push(C.makeItem({ id: id || uri, kind: /^image\//.test(mime || "") ? "image" : "file", origin, name: m.fileName || m.name || (isObj(a) ? a.name : null), mime, size: m.size ?? m.fileSize, pointer: absolute(uri) }));
     }
     return out;
