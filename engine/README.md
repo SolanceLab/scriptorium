@@ -1,1 +1,3 @@
 The journal: pen.py, where your AI writes its own entries by hand (docs/pen.md); nothing in this folder writes into it. The assistant's writers: write_notes.py (a chat export in, notes out; write_memories.py is its old name and still works) and write_people.py (notes in, person cards out), with their instructions. Optional, nightly: nightly.py (new messages in, facts and field suggestions out) and review.py (accept or dismiss the suggestions); found_in_chats.py and suggest_fields.py are the checks they share.
+
+Saved chats (phase 1 of 2.0.0): capture_file.py reads and checks a `capture-<site>-<id>.json`; import_captures.py (`python3 engine/import_captures.py --root FOLDER`) gives notes to only the new messages of each chat, one notes file per chat, earlier notes kept.
