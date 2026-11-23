@@ -418,6 +418,10 @@ def main(argv=None):
             ap.error(f"unknown time zone {a.timezone!r} (use an IANA name such as Asia/Jakarta)")
     # The same route choice as write_notes.py: --api bills the API key; otherwise Claude Code (your login) or --model-cmd.
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    try:
+        a.api = wn.notes_via_api(a.api)
+    except ValueError as e:
+        ap.error(str(e))
     if a.api:
         if a.model_cmd is not None:
             ap.error("--api cannot be used with --model-cmd or MEMORY_WRITER_CMD")
@@ -425,7 +429,7 @@ def main(argv=None):
             ap.error("--api requires ANTHROPIC_API_KEY to be set")
     elif not a.model_cmd:
         print("Notes will be written through your Claude Code login" + (" although ANTHROPIC_API_KEY is set" if key else "")
-              + "; add --api to bill the API key instead.", file=sys.stderr)
+              + "; add --api, or set SCRIPTORIUM_NOTES_VIA=api once, to bill the API key instead.", file=sys.stderr)
     model = a.model if a.model is not None else (wn.DEFAULT_API_MODEL if a.api else wn.DEFAULT_MODEL)
     model_cmd = None if a.api else a.model_cmd or wn.MODEL_CMD_TEMPLATE.format(model=shlex.quote(model))
     api_call = partial(wn.call_api, model, key) if a.api else None

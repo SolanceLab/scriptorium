@@ -25,7 +25,7 @@ class ApiRoute(unittest.TestCase):
         calls = []
         def fake_api(model, key, prompt, timeout):
             calls.append((model, key))
-            return {"text": json.dumps({"memories": []}), "cost": 0}
+            return json.dumps({"memories": []}), {"total_cost_usd": 0}
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key-not-real"}), mock.patch.object(wn, "call_api", fake_api), \
                 mock.patch.object(wn, "call_model", side_effect=AssertionError("login route used")), contextlib.redirect_stdout(io.StringIO()):
             try:
@@ -46,3 +46,30 @@ class ApiRoute(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneSetting(unittest.TestCase):
+    def test_setting_alone_routes_both_commands_to_the_api(self):
+        for main in (ic.main, wn.main):
+            calls = []
+            def fake_api(model, key, prompt, timeout, calls=calls):
+                calls.append(key)
+                return json.dumps({"memories": []}), {"total_cost_usd": 0}
+            root = _root()
+            args = ["--root", root] if main is ic.main else ["--export", os.path.join(root, "conversations.json"), "--out", os.path.join(root, "out")]
+            if main is wn.main:
+                with open(os.path.join(root, "conversations.json"), "w") as f:
+                    json.dump([{"uuid": "c2", "name": "t", "created_at": "2026-11-23T00:00:00Z", "chat_messages": [
+                        {"uuid": "m1", "sender": "human", "text": "hello", "created_at": "2026-11-23T00:00:00Z"}]}], f)
+            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key-not-real", "SCRIPTORIUM_NOTES_VIA": "api"}), \
+                    mock.patch.object(wn, "call_api", fake_api), mock.patch.object(wn, "call_model", side_effect=AssertionError("login used")), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    main(args)
+                except SystemExit:
+                    pass
+            self.assertTrue(calls, f"{main.__module__} used the API with the setting alone")
+
+    def test_bad_setting_is_refused(self):
+        with mock.patch.dict(os.environ, {"SCRIPTORIUM_NOTES_VIA": "apii"}), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ic.main(["--root", _root()])

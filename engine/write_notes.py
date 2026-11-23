@@ -57,6 +57,17 @@ DEFAULT_PROMPT = "house" if os.path.exists(PROMPTS["house"]) else "public"
 PROMPT_FILE = PROMPTS[DEFAULT_PROMPT]
 # What the model process may see of the environment. Nothing else is passed: no House keys, tokens or settings paths
 # ride along. HOME and USER are what claude needs to find its own login; the rest is locale and temp space.
+NOTES_VIA_ENV = "SCRIPTORIUM_NOTES_VIA"   # one setting for every way notes are written: "api" bills ANTHROPIC_API_KEY, "login" (or unset) uses Claude Code
+
+
+def notes_via_api(flag=False):
+    """True when notes should go through the API: the --api flag for one run, or SCRIPTORIUM_NOTES_VIA=api for all of them."""
+    value = os.environ.get(NOTES_VIA_ENV, "").strip().lower()
+    if value not in ("", "api", "login"):
+        raise ValueError(f"{NOTES_VIA_ENV} must be api or login, not {value!r}")
+    return bool(flag) or value == "api"
+
+
 ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM")
 
 GAP = "[...]"
@@ -772,6 +783,10 @@ def main(argv=None):
                          "the first conversation of a run always completes")
     a = ap.parse_args(argv)
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    try:
+        a.api = notes_via_api(a.api)
+    except ValueError as e:
+        ap.error(str(e))
     if a.api:
         if a.model_cmd is not None:
             ap.error("--api cannot be used with --model-cmd or MEMORY_WRITER_CMD")

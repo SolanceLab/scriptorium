@@ -6,6 +6,8 @@ Save your chats from the browser (`extension/`, `docs/browser-export.md`): a sma
 
 `scriptorium import --root <folder>` (`engine/import_captures.py`): reads the extension's files and each site's official account export in one folder: Claude's `conversations.json`, ChatGPT's `conversations.json` (the branch you last saw) and Grok's `prod-grok-backend.json` (only the chats file; the account and billing files beside it are never opened; temporary chats are skipped). One chat stays one record however many times, and from however many sources, it arrives: notes are written only for messages not seen before, and earlier notes stay. When a chat comes back with new messages, the notes writer sees that chat's earlier notes and its last ten turns as context only, and writes notes only about what is new. Crash-safe: an import interrupted at any point picks up the same batch once, never skipping it or writing it twice.
 
+One setting for how notes are written: `SCRIPTORIUM_NOTES_VIA=api` sends every notes run (the import command, `write_notes.py` and the `write_notes` tool) through the Anthropic API key; unset or `login` keeps Claude Code. `--api` still works for a single run.
+
 Breaking: none for existing journal and notes users; the version moves to 2.0 because Scriptorium now reads three providers and ships a browser extension.
 
 ## 1.9.0 — 23 November 2026
