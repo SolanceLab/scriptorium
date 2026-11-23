@@ -53,10 +53,10 @@
     if (!byId.has(resp.current_node)) return C.changed(site, conversationId, exportedAt, resp, "current_node not in mapping");
     const { path, top } = C.walkBranch(byId, resp.current_node, (id) => byId.get(id).parent);
     const messages = [], branch = [];
-    let streaming = false, pending = [];
+    let streaming = false, missing = false, pending = [];
     for (const nid of path) {
       const m = byId.get(nid).message;
-      if (!isObj(m)) continue;
+      if (!isObj(m)) { if (nid !== path[0]) missing = true; continue; }   // only the root node may have no message
       const role = isObj(m.author) ? m.author.role : null;
       const meta = isObj(m.metadata) ? m.metadata : {};
       if (m.status === "in_progress" && role === "assistant") streaming = true;
@@ -84,18 +84,21 @@
       messages.push(C.message("tool-" + last, "assistant", r.text, null, r.items));
       branch.push("tool-" + last);
     }
-    const reason = !top ? "the earliest turns of this chat are missing" : streaming ? "this chat is still being written; wait for it to finish"
+    const reason = !top ? "the earliest turns of this chat are missing" : missing ? "part of this chat is missing" : streaming ? "this chat is still being written; wait for it to finish"
       : messages.length === 0 ? "nothing to save: no messages found" : null;
     return C.envelope({ site, id: conversationId, title: resp.title, exportedAt, complete: !reason, reason, branch, messages, raw: resp });
   }
 
-  async function getJson(url, headers, doFetch) {
-    const r = await (doFetch || ((...a) => globalThis.fetch(...a)))(url, { credentials: "include", headers: Object.assign({ Accept: "application/json" }, headers) });
-    if (!r.ok) throw new Error("chatgpt.com answered " + r.status + " for " + new URL(url, location.href).pathname.replace(/[0-9a-f-]{36}/g, ":id"));
+  // Every API address is absolute on chatgpt.com, built from the page's origin (never document.baseURI), and checked before the bearer goes out.
+  async function getJson(path, headers, doFetch, origin) {
+    const u = new URL(path, origin || location.origin);
+    if (u.origin !== "https://chatgpt.com") throw new Error("this is not chatgpt.com; nothing was sent");
+    const r = await (doFetch || ((...a) => globalThis.fetch(...a)))(u.href, { credentials: "include", redirect: "error", headers: Object.assign({ Accept: "application/json" }, headers) });
+    if (!r.ok) throw new Error("chatgpt.com answered " + r.status + " for " + u.pathname.replace(/[0-9a-f-]{36}/g, ":id"));
     return r.json();
   }
-  async function token(doFetch) {
-    const session = await getJson("/api/auth/session", undefined, doFetch);
+  async function token(doFetch, origin) {
+    const session = await getJson("/api/auth/session", undefined, doFetch, origin);
     if (!session || typeof session.accessToken !== "string") throw new Error("chatgpt.com gave no access token; are you logged in?");
     return session.accessToken;
   }
@@ -110,8 +113,8 @@
     const doFetch = e.fetch || ((...a) => globalThis.fetch(...a));
     const origin = e.origin || location.origin;
     if (!item || !item.id) throw new Error("this item has no file id");
-    const auth = { Authorization: "Bearer " + await token(doFetch) };
-    const meta = await getJson("/backend-api/files/download/" + encodeURIComponent(item.id) + "?conversation_id=" + encodeURIComponent(conversationId) + "&inline=false", auth, doFetch);
+    const auth = { Authorization: "Bearer " + await token(doFetch, origin) };
+    const meta = await getJson("/backend-api/files/download/" + encodeURIComponent(item.id) + "?conversation_id=" + encodeURIComponent(conversationId) + "&inline=false", auth, doFetch, origin);
     let u;
     const addr = isObj(meta) ? meta.download_url : null;
     try { u = typeof addr === "string" && addr ? new URL(addr, origin) : null; } catch (err) { u = null; }

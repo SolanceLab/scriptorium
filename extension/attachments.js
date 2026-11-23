@@ -143,7 +143,7 @@
   // The finished zip's parts: attachments.json first, then files/<...> for each saved item.
   function archiveParts(results, when) {
     const where = paths(results);
-    const files = [{ name: "attachments.json", data: new TextEncoder().encode(JSON.stringify(manifest(results, where), null, 2)) }];
+    const files = [{ name: "attachments.json", data: new TextEncoder().encode(JSON.stringify(C.scrub(manifest(results, where)), null, 2)) }];
     for (const r of results) if (r.status === "saved") files.push({ name: where.get(r), data: r.bytes });
     return zipParts(files, when);
   }

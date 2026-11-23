@@ -41,11 +41,11 @@
       const page = tab && C.parseConversationUrl(tab.url);
       if (!page) return say("status", "Open one conversation first.");
       let reply;
-      try { reply = await chrome.tabs.sendMessage(tab.id, { type: "scriptorium-export" }); }
+      try { reply = await chrome.tabs.sendMessage(tab.id, { type: "scriptorium-export", site: page.site, id: page.id }); }
       catch (e) {   // a tab opened before the extension was installed has no reader yet: add it now, at this click, and ask again
         const files = chrome.runtime.getManifest().content_scripts[0].js;
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files });
-        reply = await chrome.tabs.sendMessage(tab.id, { type: "scriptorium-export" });
+        reply = await chrome.tabs.sendMessage(tab.id, { type: "scriptorium-export", site: page.site, id: page.id });
       }
       if (stale()) return;   // a recheck or newer export happened while this one was pending
       if (!reply || !reply.ok) return say("status", (reply && reply.error) || "The page did not answer; reload it and try again.", true);

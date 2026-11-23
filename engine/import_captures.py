@@ -21,6 +21,7 @@ A batch has an id. The notes file lists the batch ids it holds, so a crash after
 nothing (the state is just committed), and a crash before re-runs the batch once. Nothing is skipped or doubled.
 """
 import argparse
+from functools import partial
 import hashlib
 import json
 import os
@@ -395,7 +396,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", required=True, help="the folder holding capture-*.json and/or conversations.json")
     ap.add_argument("--out", help="folder for the notes files (default: <root>/notes)")
-    ap.add_argument("--model", default=wn.DEFAULT_MODEL, help="model id for Claude Code; pin one for a reported run")
+    ap.add_argument("--model", default=None, help="model id (default: the notes writer's default for the chosen route)")
+    ap.add_argument("--api", action="store_true",
+                    help="write notes through the Anthropic API, billed to ANTHROPIC_API_KEY, instead of your Claude Code login")
     ap.add_argument("--model-cmd", default=os.environ.get("MEMORY_WRITER_CMD"),
                     help="a whole command of your own instead of the default (overrides --model)")
     ap.add_argument("--prompt", default=wn.DEFAULT_PROMPT, help="public | house (House copy only) | a path")
@@ -413,8 +416,19 @@ def main(argv=None):
             ZoneInfo(a.timezone)
         except Exception:
             ap.error(f"unknown time zone {a.timezone!r} (use an IANA name such as Asia/Jakarta)")
-    # shortcut: no --api here; use --model-cmd, or add the same partial(call_api, ...) wiring write_notes.main has
-    model_cmd = a.model_cmd or wn.MODEL_CMD_TEMPLATE.format(model=shlex.quote(a.model))
+    # The same route choice as write_notes.py: --api bills the API key; otherwise Claude Code (your login) or --model-cmd.
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if a.api:
+        if a.model_cmd is not None:
+            ap.error("--api cannot be used with --model-cmd or MEMORY_WRITER_CMD")
+        if not key:
+            ap.error("--api requires ANTHROPIC_API_KEY to be set")
+    elif not a.model_cmd:
+        print("Notes will be written through your Claude Code login" + (" although ANTHROPIC_API_KEY is set" if key else "")
+              + "; add --api to bill the API key instead.", file=sys.stderr)
+    model = a.model if a.model is not None else (wn.DEFAULT_API_MODEL if a.api else wn.DEFAULT_MODEL)
+    model_cmd = None if a.api else a.model_cmd or wn.MODEL_CMD_TEMPLATE.format(model=shlex.quote(model))
+    api_call = partial(wn.call_api, model, key) if a.api else None
     prompt_path = wn.PROMPTS.get(a.prompt, a.prompt)
     with open(prompt_path, encoding="utf-8") as f:
         template = wn.render_instructions(f.read(), a.prompt, a.user_name, a.agent_name, a.platform)
@@ -422,7 +436,7 @@ def main(argv=None):
 
     def write(conv):
         t0 = time.time()
-        res = wn.write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone,
+        res = wn.write_conversation(conv, template, model_cmd, a.timeout, tz=a.timezone, api_call=api_call,
                                     builtin_prompt=a.prompt in wn.PROMPTS)
         res["writer"] = dict(record, seconds=round(time.time() - t0, 1))
         return res

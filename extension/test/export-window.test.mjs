@@ -43,3 +43,28 @@ test("a stale export reply after a recheck does not restore the preview or enabl
   assert.equal(els.save.disabled, true, "Save stays disabled");
   assert.equal(els.save.hidden, true);
 });
+
+// content.js: the export ask names the chat the window parsed; the page must still show it before and after the fetch.
+function runContent(href, fetchConversation) {
+  let listener;
+  const S = { common: null, sites: { claude: { fetchConversation, toEnvelope: (d, id) => ({ site: "claude", conversation_id: id, complete: true, messages: [] }) } }, attachments: { CHUNK: 4 } };
+  const location = { href };
+  const ctx = { chrome: { runtime: { onMessage: { addListener: (fn) => (listener = fn) } } }, location, URL, console };
+  ctx.globalThis = ctx; ctx.Scriptorium = S;
+  vm.createContext(ctx);
+  vm.runInContext(read("common.js"), ctx);
+  S.common = ctx.Scriptorium.common;
+  vm.runInContext(read("content.js"), ctx);
+  const ask = (msg) => new Promise((r) => { listener(msg, {}, r); });
+  return { ask, location };
+}
+test("content: refuses when the open chat is not the one asked for, before and after fetching", async () => {
+  let c = runContent("https://claude.ai/chat/B", async () => ({}));
+  const r0 = await c.ask({ type: "scriptorium-export", site: "claude", id: "A" });
+  assert.equal(r0.ok, false); assert.equal(r0.error, "a different chat is open now");
+  c = runContent("https://claude.ai/chat/A", async () => { c.location.href = "https://claude.ai/chat/B"; return {}; });
+  assert.equal((await c.ask({ type: "scriptorium-export", site: "claude", id: "A" })).error, "a different chat is open now");
+  c = runContent("https://claude.ai/chat/A", async () => ({}));
+  assert.equal((await c.ask({ type: "scriptorium-export", site: "claude", id: "A" })).ok, true);
+  assert.equal((await c.ask({ type: "scriptorium-export" })).error, "a different chat is open now");   // an ask that names no chat is refused
+});

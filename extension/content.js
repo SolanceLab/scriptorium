@@ -23,10 +23,13 @@
     }
     if (!msg || msg.type !== "scriptorium-export") return false;
     (async () => {
+      const open = () => { const p = S.common.parseConversationUrl(location.href); return p && p.site === msg.site && p.id === msg.id ? p : null; };
       const page = S.common.parseConversationUrl(location.href);
       if (!page) return sendResponse({ ok: false, error: "Open one conversation first." });
+      if (!open()) return sendResponse({ ok: false, error: "a different chat is open now" });   // the window asked for another chat than this tab shows
       const reader = S.sites[page.site];
       const data = await reader.fetchConversation(page.id);
+      if (!open()) return sendResponse({ ok: false, error: "a different chat is open now" });   // the tab moved on while fetching
       sendResponse({ ok: true, envelope: reader.toEnvelope(data, page.id, S.common.nowIso()) });
     })().catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;

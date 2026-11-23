@@ -205,3 +205,50 @@ test("grok: an uploaded file's address comes from its metadata path, and image/j
   assert.equal(item.kind, "image");
   assert.equal(item.name, "IMG_1.jpg");
 });
+
+test("chatgpt: a node on the path with no message is incomplete, except the root", () => {
+  const m = (role, t) => ({ author: { role }, content: { parts: [t] } });
+  const root = { current_node: "b", mapping: { r: { parent: null, message: null }, a: { parent: "r", message: m("user", "q") }, b: { parent: "a", message: m("assistant", "x") } } };
+  assert.equal(sites.chatgpt.toEnvelope(root, "x", AT).complete, true);
+  const mid = { current_node: "b", mapping: { r: { parent: null, message: null }, a: { parent: "r", message: null }, b: { parent: "a", message: m("assistant", "x") } } };
+  const env = sites.chatgpt.toEnvelope(mid, "x", AT);
+  assert.equal(env.complete, false);
+  assert.match(env.reason, /part of this chat is missing/);
+});
+
+test("grok: an outside parent is the start only when exactly one node has one", () => {
+  const nd = (id, p, s = "assistant") => ({ responseId: id, sender: s, parentResponseId: p });
+  const rs = (id, p, s, t) => ({ responseId: id, sender: s, message: t, parentResponseId: p, createTime: "2026-11-23T00:00:0" + t.length + "Z" });
+  const two = { title: "t", inflight: [], rid: "a1", nodes: [nd("u1", "gone", "human"), nd("a1", "u1"), nd("u2", "gone2", "human")],
+    responses: [rs("u1", "gone", "human", "hi"), rs("a1", "u1", "assistant", "hello")] };
+  const env = sites.grok.toEnvelope(two, "c", AT);
+  assert.equal(env.complete, false);
+  assert.match(env.reason, /earliest turns|missing/);
+  const one = { ...two, nodes: two.nodes.slice(0, 2) };
+  assert.equal(sites.grok.toEnvelope(one, "c", AT).complete, true);
+});
+
+test("grok: a bare asset path resolves only to assets.grok.com", () => {
+  const mk = (a) => sites.grok.toEnvelope({ title: "t", inflight: [], rid: "a1", nodes: [{ responseId: "a1", sender: "human", parentResponseId: null }],
+    responses: [{ responseId: "a1", sender: "human", message: "x", imageAttachments: [{ url: a }], createTime: "2026-11-23T00:00:00Z" }] }, "c", AT).messages[0].attachments[0].pointer;
+  assert.equal(mk("u/p.png"), "https://assets.grok.com/u/p.png");
+  assert.equal(mk("x.evil.example\\@e.com"), "https://assets.grok.com/x.evil.example\\@e.com");
+});
+
+test("chatgpt: every API call is an absolute chatgpt.com address; a foreign origin never gets the bearer", async () => {
+  const urls = [];
+  const fetch = async (u, init) => { urls.push([u, init.redirect]); return { ok: true, json: async () => ({ accessToken: "T", download_url: null }), headers: { get: () => null } }; };
+  await assert.rejects(sites.chatgpt.fetchAttachment({ id: "f" }, "c", { fetch, origin: "https://evil.example" }), /not chatgpt.com/);
+  assert.equal(urls.length, 0);
+  await assert.rejects(sites.chatgpt.fetchAttachment({ id: "f" }, "c", { fetch, origin: "https://chatgpt.com" }), /no download address/);
+  assert.ok(urls.every(([u, r]) => u.startsWith("https://chatgpt.com/") && r === "error"));
+});
+
+test("grok: a reply whose parent is missing, beside a real root, is incomplete", () => {
+  const nd = (id, p, s) => ({ responseId: id, sender: s, parentResponseId: p });
+  const rs = (id, s, t) => ({ responseId: id, sender: s, message: t, createTime: "2026-11-23T00:00:01Z" });
+  const resp = { title: "t", inflight: [], rid: "a1", nodes: [nd("u0", null, "human"), nd("a1", "gone", "assistant")],
+    responses: [rs("u0", "human", "hi"), rs("a1", "assistant", "hello")] };
+  const env = sites.grok.toEnvelope(resp, "c", AT);
+  assert.equal(env.complete, false);
+});

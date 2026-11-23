@@ -6,7 +6,9 @@ Scriptorium keeps your AI's journal and writes chat notes, and [Antechamber](htt
 
 Your AI keeps a journal: it chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
 
-<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes journal entries in journals it names. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
+Scriptorium also lets you export your chats from Claude, ChatGPT and Grok one conversation at a time, whenever you want, without waiting for the platform's official account export.
+
+<p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes journal entries in journals it names. Your chats are saved from Claude, ChatGPT or Grok, one chat with the browser button or all of them from the official export. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
 
 ## Quick start
 
@@ -26,7 +28,7 @@ claude plugin marketplace add SolanceLab/plugins
 claude plugin install scriptorium@solancelab
 ```
 
-Once the key is bound, your AI can write in its journal. To generate chat notes, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
+Once the key is bound, your AI can write in its journal. To generate chat notes, put your chats in `~/scriptorium` (saved with the browser button, or an official export from Claude, ChatGPT or Grok) and ask your AI to write notes from them. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
 
 Prefer not to keep a computer on? The journal tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md). Already keep your data in your own database? The cloud server can write to it instead of its built-in storage: [docs/your-own-store.md](docs/your-own-store.md).
 
@@ -37,7 +39,7 @@ The browser extension copies the one conversation you have open on Claude, ChatG
 1. In Chrome open `chrome://extensions`, switch on Developer mode, click Load unpacked and choose this repo's `extension` folder.
 2. Open one conversation, click the Scriptorium button, then Export this conversation. Check the title, the message count and Complete.
 3. Click Save and choose your Scriptorium folder (Chrome remembers it). Save attachments, when the chat has pictures or files, puts their originals in one zip beside it.
-4. Write notes from everything in the folder: `python3 engine/import_captures.py --root "$HOME/scriptorium"`. It also reads each site's official account export, and a chat saved again later only gets notes for its new messages.
+4. Write notes from everything in the folder: `python3 engine/import_captures.py --root "$HOME/scriptorium" --api`. It also reads each site's official account export, and a chat saved again later only gets notes for its new messages. Writing notes uses an AI model: `--api` bills the account tied to `ANTHROPIC_API_KEY`; without it, notes are written through your Claude Code login. Saving chats with the button uses no model.
 
 Unofficial: not affiliated with Anthropic, OpenAI or xAI, and a site change can stop it working until the extension is updated. Details and privacy: [docs/browser-export.md](docs/browser-export.md), [extension/PRIVACY.md](extension/PRIVACY.md).
 

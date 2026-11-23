@@ -27,7 +27,12 @@
   const looksLikeAddress = (s) => typeof s === "string" && /^(https?:\/\/|\/)/.test(s);
   // shortcut: a relative file address is taken to live on Grok's assets host; confirm on a chat with a real file.
   const ASSETS = "https://assets.grok.com/";
-  const absolute = (s) => (typeof s === "string" && s ? (/^https?:\/\//.test(s) || s.startsWith("/") ? s : ASSETS + s) : null);
+  // A bare path may only resolve to https://assets.grok.com; anything that would land elsewhere is no address.
+  function absolute(s) {
+    if (typeof s !== "string" || !s) return null;
+    if (/^https?:\/\//.test(s) || s.startsWith("/")) return s;
+    try { return new URL(ASSETS + s).origin === "https://assets.grok.com" ? ASSETS + s : null; } catch (e) { return null; }
+  }
 
   // The items a response shows (phase 4 shape): generated images; uploaded images; uploaded files (+ their names and types).
   function assetItems(x, uploaded, origin = "uploaded") {   // origin: who added these attachments to the turn
@@ -86,10 +91,13 @@
       if (!isObj(x) || typeof x.responseId !== "string" || !x.responseId) return C.changed(site, conversationId, exportedAt, resp, "unexpected response");
       byId.set(x.responseId, x);
     }
-    // response-node returns the whole tree, so a parent that is not one of its nodes (empty, or an id Grok keeps
-    // outside the tree) marks the first message; it is never missing history.
+    // response-node returns the whole tree. An empty parent is the first message. A parent that is not one of its nodes (an id
+    // Grok keeps outside the tree) is the start only when exactly one node has such a parent; with more, history is missing.
     const nodeIds = new Set(nodes.map((n) => n.responseId));
-    const parentOf = new Map(nodes.map((n) => [n.responseId, nodeIds.has(n.parentResponseId) ? n.parentResponseId : null]));
+    const outside = nodes.filter((n) => n.parentResponseId && !nodeIds.has(n.parentResponseId));
+    // A node with no parent is a root too: with one already there, an outside parent is a second start, not the first.
+    const hasRoot = nodes.some((n) => !n.parentResponseId);
+    const parentOf = new Map(nodes.map((n) => [n.responseId, nodeIds.has(n.parentResponseId) ? n.parentResponseId : (outside.length === 1 && !hasRoot) || !n.parentResponseId ? null : "\0outside"]));
     const times = new Map(resp.responses.map((x) => [x.responseId, epoch(x.createTime)]));
     const leaf = typeof resp.leaf === "string" && parentOf.has(resp.leaf) ? resp.leaf : pickLeaf(nodes, resp.rid, times);
     const inflight = Array.isArray(resp.inflight) && resp.inflight.length > 0;
@@ -128,7 +136,7 @@
     const fail = (what, r) => ({ unavailable: "Grok did not give " + what + (r && r.status ? " (answered " + r.status + ")" : "") + "; reload the page and try again" });
     let tree;
     try {
-      const r = await doFetch(base + "/response-node?includeThreads=true", { method: "GET", credentials: "include", headers: { Accept: "application/json" } });
+      const r = await doFetch(base + "/response-node?includeThreads=true", { method: "GET", credentials: "include", redirect: "error", headers: { Accept: "application/json" } });
       if (!r.ok) return fail("this chat's messages", r);
       tree = await r.json();
     } catch (err) { return fail("this chat's messages"); }
@@ -137,7 +145,7 @@
     const have = new Map();
     const load = async (ids) => {
       for (let i = 0; i < ids.length; i += BATCH) {
-        const r = await doFetch(base + "/load-responses", { method: "POST", credentials: "include", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ responseIds: ids.slice(i, i + BATCH) }) });
+        const r = await doFetch(base + "/load-responses", { method: "POST", credentials: "include", redirect: "error", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ responseIds: ids.slice(i, i + BATCH) }) });
         if (!r.ok) throw Object.assign(new Error("load"), { status: r.status });
         const data = await r.json();
         if (!isObj(data) || !Array.isArray(data.responses)) throw new Error("shape");

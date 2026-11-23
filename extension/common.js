@@ -100,8 +100,10 @@
   }
 
   // GET one file's bytes: {bytes: Uint8Array, mime}. The error names the path with ids hidden, never the signed query.
+  // A request that carries the login never follows a redirect: the site could bounce it to another host.
+  function guarded(init) { return init && init.credentials === "include" ? Object.assign({}, init, { redirect: "error" }) : init; }
   async function getBytes(doFetch, url, init) {
-    const r = await doFetch(url, Object.assign({ method: "GET" }, init));
+    const r = await doFetch(url, guarded(Object.assign({ method: "GET" }, init)));
     if (!r.ok) throw new Error(new URL(url, "https://x.invalid").pathname.replace(/[0-9a-f-]{36}/g, ":id").slice(0, 60) + " answered " + r.status);
     const ct = r.headers && typeof r.headers.get === "function" ? r.headers.get("content-type") : null;
     return { bytes: new Uint8Array(await r.arrayBuffer()), mime: ct ? ct.split(";")[0].trim() : null };
@@ -111,6 +113,32 @@
     try { const u = new URL(url, origin); return u.protocol === "https:" && u.origin === origin ? u : null; } catch (e) { return null; }
   }
 
+  // A copy safe to write to disk: every http(s) URL string loses its query, fragment and login (signed addresses carry keys there),
+  // and keys that hold a token or credential are dropped, anywhere in the tree.
+  const SECRET_KEY = /^(access_?token|refresh_?token|id_?token|session_?token|authorization)$/i;
+  // Only values under a URL-named key (pointer, url, uri(s), href, src) are cut: message text is never touched, even when it is
+  // only a link. Such a value with no spaces (full address, relative or bare path) loses its query, fragment and login.
+  const URL_KEY = /(pointer|url|uris?|href|src)$/i;
+  const cut = (s) => s.replace(/[?#][\s\S]*$/, "").replace(/^(https?:\/\/)[^/]*@/i, "$1");
+  const TEXT_KEY = /^(text|message|query|title|body|content|parts)$/i;   // what was written: never altered
+  function scrub(v, key) {
+    if (typeof v === "string") {
+      if (key === "reason") return v.replace(/(https?:\/\/[^\s?#]*)[?#]\S*/gi, "$1");   // a failure note: any link in it loses its query
+      if (typeof key === "string" && URL_KEY.test(key) && /^\S+$/.test(v)) return cut(v);
+      // Any other value that is a whole web address (an attachment id, a raw list of image links) loses its query too;
+      // what the person or the AI wrote (text, message) is kept exactly as written.
+      if (!(typeof key === "string" && TEXT_KEY.test(key)) && /^https?:\/\/\S+$/i.test(v)) return cut(v);
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x) => scrub(x, key));
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const k of Object.keys(v)) if (!SECRET_KEY.test(k)) out[k] = scrub(v[k], k);
+      return out;
+    }
+    return v;
+  }
+
   function preview(env) {
     return { site: env.site, title: env.title, count: env.messages.length, complete: env.complete === true, reason: env.reason || null };
   }
@@ -118,7 +146,7 @@
   // Save is allowed only for a copy that says it is complete.
   function canSave(env) { return !!env && env.complete === true; }
   // The bytes of a saved file, as a Blob (never a data: URL, which Chrome caps near 2 MB).
-  function captureBlob(env) { return new Blob([JSON.stringify(env, null, 2)], { type: "application/json" }); }
+  function captureBlob(env) { return new Blob([JSON.stringify(scrub(env), null, 2)], { type: "application/json" }); }
   // The exact file name the importer reads, only for a complete envelope.
   function captureFilename(env) { return canSave(env) ? captureName(env.site, env.conversation_id) : null; }
 
@@ -143,5 +171,5 @@
   // Runs fn at most once (revoking a blob URL on complete, on interrupt and on unload: only the first counts).
   function once(fn) { let done = false; return (...a) => { if (done) return false; done = true; fn(...a); return true; }; }
 
-  return { getBytes, sameOriginUrl, makeItem, itemMarker, renderPieces, message, canSave, captureBlob, captureFilename, exportPagePath, tabIdFromSearch, downloadOutcome, once, SCHEMA_VERSION, SITES, CHANGED, encodeId, captureName, parseConversationUrl, isoFromEpoch, nowIso, envelope, changed, walkBranch, preview };
+  return { getBytes, guarded, scrub, sameOriginUrl, makeItem, itemMarker, renderPieces, message, canSave, captureBlob, captureFilename, exportPagePath, tabIdFromSearch, downloadOutcome, once, SCHEMA_VERSION, SITES, CHANGED, encodeId, captureName, parseConversationUrl, isoFromEpoch, nowIso, envelope, changed, walkBranch, preview };
 });

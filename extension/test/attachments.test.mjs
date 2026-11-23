@@ -109,14 +109,14 @@ test("fetchers: only this chat's addresses; chatgpt asks the download endpoint f
   const fetch = async (url, init) => {
     calls.push([url, init && init.credentials]);
     const ok = (body) => ({ ok: true, json: async () => body, arrayBuffer: async () => Uint8Array.from([9, 9]).buffer, headers: { get: () => "image/png; x=1" } });
-    if (url === "/api/auth/session") return ok({ accessToken: "T" });
-    if (url.startsWith("/backend-api/files/download/")) return ok({ download_url: "https://files.example.net/signed?x=1" });
+    if (url === "https://chatgpt.com/api/auth/session") return ok({ accessToken: "T" });
+    if (url.startsWith("https://chatgpt.com/backend-api/files/download/")) return ok({ download_url: "https://files.example.net/signed?x=1" });
     return ok({});
   };
   const got = await chatgpt.fetchAttachment({ id: "file-AAA", mime: "image/png" }, "c1", { fetch, origin: "https://chatgpt.com" });
   assert.deepEqual([...got.bytes], [9, 9]);
   assert.equal(got.mime, "image/png");
-  assert.equal(calls[1][0], "/backend-api/files/download/file-AAA?conversation_id=c1&inline=false");
+  assert.equal(calls[1][0], "https://chatgpt.com/backend-api/files/download/file-AAA?conversation_id=c1&inline=false");
   assert.deepEqual(calls[2], ["https://files.example.net/signed?x=1", "omit"]);
   await assert.rejects(chatgpt.fetchAttachment({ id: null }, "c1", { fetch, origin: "https://chatgpt.com" }), /no file id/);
   await assert.rejects(claude.fetchAttachment({ pointer: "https://evil.example/x" }, "c", { fetch, origin: "https://claude.ai" }), /not on claude.ai/);
@@ -156,7 +156,7 @@ test("chatgpt: a null or empty download_url is refused, never fetched", async ()
   for (const url of [null, ""]) {
     const calls = [];
     const fetch = async (u) => { calls.push(u); const ok = (b) => ({ ok: true, json: async () => b, arrayBuffer: async () => new ArrayBuffer(1), headers: { get: () => "text/html" } });
-      return u === "/api/auth/session" ? ok({ accessToken: "T" }) : ok({ download_url: url }); };
+      return u === "https://chatgpt.com/api/auth/session" ? ok({ accessToken: "T" }) : ok({ download_url: url }); };
     await assert.rejects(chatgpt.fetchAttachment({ id: "file-A" }, "c1", { fetch, origin: "https://chatgpt.com" }), /no download address/);
     assert.equal(calls.length, 2);
   }

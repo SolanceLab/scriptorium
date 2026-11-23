@@ -98,3 +98,56 @@ test("ChatGPT chats inside a project or a custom GPT are recognised", () => {
   assert.deepEqual(parse("https://chatgpt.com/c/abc-1"), { site: "chatgpt", id: "abc-1" });
   assert.equal(parse("https://chatgpt.com/g/g-p-6912abc-public-ledger/project"), null);
 });
+
+test("scrub: signed query strings, fragments, logins and token keys never reach the saved file", async () => {
+  const signed = "https://files.example.net/a/b.png?sig=SECRETSIG&Expires=99#frag";
+  const env = { complete: true, site: "chatgpt", conversation_id: "c", pointer: signed, messages: [{ attachments: [{ pointer: signed }] }],
+    raw: { deep: [{ url: "https://u:p@x.example/p?token=abc" }], accessToken: "BEARERVALUE", keep: "see https://x.example/q?z=1 in text is prose", n: 3 } };
+  const text = await C.captureBlob(env).text();
+  for (const bad of ["SECRETSIG", "Expires", "frag", "BEARERVALUE", "accessToken", "token=abc", "u:p@"]) assert.ok(!text.includes(bad), bad);
+  const out = JSON.parse(text);
+  assert.equal(out.pointer, "https://files.example.net/a/b.png");
+  assert.equal(out.raw.deep[0].url, "https://x.example/p");
+  assert.equal(out.raw.n, 3);
+  assert.equal(env.pointer, signed);   // the copy in memory (which the attachment fetch reads) is untouched
+  const A = createRequire(import.meta.url)("../attachments.js");
+  const parts = A.archiveParts([{ entry: { messageId: "m", n: 1, marker: "x", item: { name: "n", mime: null, size: 1 } }, status: "missing", reason: "https://h.example/f?sig=ZZZ" }]);
+  assert.ok(!Buffer.concat(parts.map((x) => Buffer.from(x))).toString("latin1").includes("ZZZ"));
+});
+
+test("getBytes: a credentialed request never follows a redirect; an uncredentialed one is left alone", async () => {
+  const seen = [];
+  const f = async (u, init) => { seen.push(init); return { ok: true, arrayBuffer: async () => new ArrayBuffer(0), headers: { get: () => null } }; };
+  await C.getBytes(f, "https://a.example/x", { credentials: "include" });
+  await C.getBytes(f, "https://a.example/x", { credentials: "omit" });
+  assert.equal(seen[0].redirect, "error");
+  assert.equal(seen[1].redirect, undefined);
+});
+
+test("scrub: message text that starts with a link keeps its text; relative signed pointers lose the query", async () => {
+  const text = "https://example.com/?q=hello and more words";
+  const env = { complete: true, site: "claude", conversation_id: "c", messages: [{ text, attachments: [{ pointer: "/file?sig=RELSIG#x" }] }], raw: { download_url: "/dl/a?sig=RELSIG2", note: "/not/a/url?x=1" } };
+  const out = JSON.parse(await C.captureBlob(env).text());
+  assert.equal(out.messages[0].text, text);
+  assert.equal(out.messages[0].attachments[0].pointer, "/file");
+  assert.equal(out.raw.download_url, "/dl/a");
+  assert.equal(out.raw.note, "/not/a/url?x=1");
+});
+
+test("scrub: a message that is only a link keeps its text; bare signed paths under fileUris lose the query", async () => {
+  const text = "https://example.com/search?q=hello#results";
+  const env = { complete: true, site: "grok", conversation_id: "c", messages: [{ text }], raw: { fileUris: ["media/a.png?sig=TEST"] } };
+  const out = JSON.parse(await C.captureBlob(env).text());
+  assert.equal(out.messages[0].text, text);
+  assert.deepEqual(out.raw.fileUris, ["media/a.png"]);
+});
+
+test("signed links leave every field of the saved file, written text stays as written", async () => {
+  const env = { site: "grok", messages: [{ id: "m1", role: "assistant", text: "see https://x.example/a?keep=1",
+    attachments: [{ id: "https://assets.grok.com/g/1.png?sig=SECRET&Expires=9", pointer: "https://assets.grok.com/g/1.png?sig=SECRET" }] }],
+    raw: { responses: [{ message: "https://x.example/a?keep=1", generatedImageUrls: ["https://assets.grok.com/g/1.png?sig=SECRET&Expires=9"] }] } };
+  const out = await C.captureBlob(env).text();
+  assert.ok(!out.includes("SECRET"), "no signature left anywhere");
+  assert.ok(!out.includes("Expires"), "no expiry left anywhere");
+  assert.ok(out.includes("see https://x.example/a?keep=1"), "the message text is untouched");
+});

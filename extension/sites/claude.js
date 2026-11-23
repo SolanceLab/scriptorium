@@ -74,7 +74,7 @@
   }
 
   async function getJson(url) {
-    const r = await fetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+    const r = await fetch(url, { credentials: "include", redirect: "error", headers: { Accept: "application/json" } });
     if (!r.ok) throw new Error("claude.ai answered " + r.status + " for " + new URL(url, location.href).pathname.replace(/[0-9a-f-]{36}/g, ":id"));
     return r.json();
   }
