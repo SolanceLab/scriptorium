@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "site": "grok",
+  "conversation_id": "g-1",
+  "title": "Branched chat",
+  "exported_at": "2026-11-23T10:00:00Z",
+  "complete": true,
+  "branch": [
+    "r1",
+    "r3",
+    "r4"
+  ],
+  "messages": [
+    {
+      "id": "r1",
+      "role": "user",
+      "text": "hello there friend",
+      "created_at": "2026-11-20T10:00:00Z"
+    },
+    {
+      "id": "r3",
+      "role": "assistant",
+      "text": "retried answer",
+      "created_at": "2026-11-20T10:01:00Z"
+    },
+    {
+      "id": "r4",
+      "role": "user",
+      "text": "and again",
+      "created_at": "2026-11-20T10:02:00Z"
+    }
+  ],
+  "raw": {
+    "conversation": {
+      "id": "g-1",
+      "title": "Branched chat",
+      "leaf_response_id": "r4"
+    },
+    "responses": [
+      {
+        "response": {
+          "_id": "r1",
+          "message": "hello there friend",
+          "sender": "human",
+          "create_time": {
+            "$date": {
+              "$numberLong": "1795168800000"
+            }
+          }
+        }
+      },
+      {
+        "response": {
+          "_id": "r2",
+          "message": "first answer, later retried",
+          "sender": "ASSISTANT",
+          "parent_response_id": "r1",
+          "create_time": {
+            "$date": {
+              "$numberLong": "1795168805000"
+            }
+          }
+        }
+      },
+      {
+        "response": {
+          "_id": "r3",
+          "message": "retried answer",
+          "sender": "ASSISTANT",
+          "parent_response_id": "r1",
+          "create_time": {
+            "$date": {
+              "$numberLong": "1795168860000"
+            }
+          }
+        }
+      },
+      {
+        "response": {
+          "_id": "r4",
+          "message": "and again",
+          "sender": "human",
+          "parent_response_id": "r3",
+          "create_time": {
+            "$date": {
+              "$numberLong": "1795168920000"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

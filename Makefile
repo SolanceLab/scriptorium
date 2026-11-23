@@ -1,5 +1,5 @@
 # `make test` runs every test in this room.
-.PHONY: test test-people-page people-page
+.PHONY: test test-extension test-people-page people-page
 test:
 	python3 -W error::ResourceWarning -m unittest discover -s tests
 
@@ -15,3 +15,7 @@ people-page:
 test-people-page:
 	@test -d node_modules || npm install
 	npm run test:dashboard
+
+# The browser extension's tests (plain Node, no npm install). Needs Node 22 or newer.
+test-extension:
+	node --test extension/test/*.test.mjs

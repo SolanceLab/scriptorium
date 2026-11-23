@@ -1,0 +1,97 @@
+[
+ {
+  "site": "claude",
+  "id": "abc",
+  "name": "capture-claude-abc.json"
+ },
+ {
+  "site": "chatgpt",
+  "id": "abc",
+  "name": "capture-chatgpt-abc.json"
+ },
+ {
+  "site": "grok",
+  "id": "abc",
+  "name": "capture-grok-abc.json"
+ },
+ {
+  "site": "claude",
+  "id": "69a1-b",
+  "name": "capture-claude-69a1-b.json"
+ },
+ {
+  "site": "claude",
+  "id": "c1-é/2",
+  "name": "capture-claude-c1-%C3%A9%2F2.json"
+ },
+ {
+  "site": "claude",
+  "id": "a b",
+  "name": "capture-claude-a%20b.json"
+ },
+ {
+  "site": "claude",
+  "id": "a%b",
+  "name": "capture-claude-a%25b.json"
+ },
+ {
+  "site": "claude",
+  "id": "x.y_z~w",
+  "name": "capture-claude-x.y_z~w.json"
+ },
+ {
+  "site": "claude",
+  "id": "it's (ok)!*",
+  "name": "capture-claude-it%27s%20%28ok%29%21%2A.json"
+ },
+ {
+  "site": "claude",
+  "id": "日本語",
+  "name": "capture-claude-%E6%97%A5%E6%9C%AC%E8%AA%9E.json"
+ },
+ {
+  "site": "claude",
+  "id": "aé́",
+  "name": "capture-claude-a%C3%A9%CC%81.json"
+ },
+ {
+  "site": "claude",
+  "id": "../../etc",
+  "name": "capture-claude-..%2F..%2Fetc.json"
+ },
+ {
+  "site": "claude",
+  "id": "UPPER-lower",
+  "name": "capture-claude-UPPER-lower.json"
+ },
+ {
+  "site": "claude",
+  "id": "a+b=c&d",
+  "name": "capture-claude-a%2Bb%3Dc%26d.json"
+ },
+ {
+  "site": "claude",
+  "id": "semi;colon:?",
+  "name": "capture-claude-semi%3Bcolon%3A%3F.json"
+ },
+ {
+  "site": "claude",
+  "id": "tab\tnl\n",
+  "name": "capture-claude-tab%09nl%0A.json"
+ },
+ {
+  "site": "claude",
+  "id": "😀",
+  "name": "capture-claude-%F0%9F%98%80.json"
+ },
+ {
+  "site": "claude",
+  "id": "-",
+  "name": "capture-claude--.json"
+ },
+ {
+  "site": "claude",
+  "id": ".",
+  "name": "capture-claude-..json"
+ }
+]

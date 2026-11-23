@@ -11,3 +11,4 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run test:dashboard
+      - run: make test-extension

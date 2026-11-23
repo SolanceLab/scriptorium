@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scriptorium Export</title>
+<link rel="stylesheet" href="export.css">
+</head>
+<body>
+<main>
+  <h1>Scriptorium Export</h1>
+  <p id="status" role="status">Looking at the tab...</p>
+  <dl id="preview" hidden>
+    <dt>Site</dt><dd id="p-site"></dd>
+    <dt>Title</dt><dd id="p-title"></dd>
+    <dt>Messages</dt><dd id="p-count"></dd>
+    <dt>State</dt><dd id="p-state"></dd>
+  </dl>
+  <div class="row">
+    <button id="export" type="button" hidden>Export this conversation</button>
+    <button id="save" type="button" hidden disabled>Save</button>
+  </div>
+  <p id="result" role="status"></p>
+  <p class="fine">Unofficial. Not affiliated with OpenAI, Anthropic or xAI. Copies the one conversation you have open, only when you click, into a file on your computer. Nothing is sent anywhere else.</p>
+</main>
+<script src="common.js"></script>
+<script src="export.js"></script>
+</body>
+</html>

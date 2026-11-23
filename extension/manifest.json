@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Scriptorium Export",
+  "version": "2.0.0",
+  "description": "Unofficial. Copies the one conversation you have open on Claude, ChatGPT or Grok into a file on your computer, only when you click.",
+  "permissions": [
+    "activeTab",
+    "downloads"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://grok.com/*"
+  ],
+  "action": {
+    "default_title": "Scriptorium Export"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://chatgpt.com/*",
+        "https://grok.com/*"
+      ],
+      "js": [
+        "common.js",
+        "sites/claude.js",
+        "sites/chatgpt.js",
+        "sites/grok.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

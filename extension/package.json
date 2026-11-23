@@ -1,0 +1,6 @@
+{
+  "name": "scriptorium-export-extension",
+  "private": true,
+  "type": "commonjs",
+  "license": "PolyForm-Noncommercial-1.0.0"
+}
