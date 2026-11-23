@@ -2,7 +2,25 @@
 // Runs on the three chat sites and does nothing until the export window asks. One ask = the one conversation in this tab.
 (function () {
   const S = globalThis.Scriptorium;
+  let held = null;
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.type === "scriptorium-attachment-chunk") {   // bytes [index*CHUNK, +CHUNK) of the held item, base64
+      const at = msg.index * S.attachments.CHUNK;
+      if (!held || !(at >= 0) || at > held.length) { sendResponse({ ok: false, error: "No fetched item is waiting." }); return false; }
+      sendResponse({ ok: true, base64: S.attachments.toBase64(held.subarray(at, at + S.attachments.CHUNK)) });
+      if (at + S.attachments.CHUNK >= held.length) held = null;
+      return false;
+    }
+    if (msg && msg.type === "scriptorium-fetch-attachment") {   // one item of this chat, as its original bytes (base64: messages carry text, not binary)
+      (async () => {
+        const page = S.common.parseConversationUrl(location.href);
+        if (!page || page.site !== msg.site || page.id !== msg.conversation_id) return sendResponse({ ok: false, error: "The open chat changed." });
+        const got = await S.sites[page.site].fetchAttachment(msg.item, page.id);
+        held = got.bytes;   // one item at a time; the window pulls it in bounded chunks and so stays under the message size limit
+        sendResponse({ ok: true, size: held.length, chunk: S.attachments.CHUNK, mime: got.mime || null });
+      })().catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+      return true;
+    }
     if (!msg || msg.type !== "scriptorium-export") return false;
     (async () => {
       const page = S.common.parseConversationUrl(location.href);

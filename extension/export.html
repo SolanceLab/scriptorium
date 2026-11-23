@@ -19,11 +19,13 @@
   <div class="row">
     <button id="export" type="button" hidden>Export this conversation</button>
     <button id="save" type="button" hidden disabled>Save</button>
+    <button id="saveatt" type="button" hidden disabled>Save attachments</button>
   </div>
   <p id="result" role="status"></p>
-  <p class="fine">Unofficial. Not affiliated with OpenAI, Anthropic or xAI. Copies the one conversation you have open, only when you click, into a file on your computer. Nothing is sent anywhere else.</p>
+  <p class="fine">Unofficial. Not affiliated with OpenAI, Anthropic or xAI. Copies the one conversation you have open, only when you click, into a file on your computer; Save attachments fetches that chat's own images and files into one zip. Nothing is sent anywhere else.</p>
 </main>
 <script src="common.js"></script>
+<script src="attachments.js"></script>
 <script src="export.js"></script>
 </body>
 </html>

@@ -8,9 +8,37 @@
 })(globalThis, function (C) {
   const ZERO = "00000000-0000-4000-8000-000000000000";   // parent_message_uuid of a first message
 
-  function text(m) {
-    const blocks = Array.isArray(m.content) ? m.content.filter((b) => b && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n") : "";
-    return blocks.trim() ? blocks : typeof m.text === "string" ? m.text : "";
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const isImage = (kind, mime) => kind === "image" || /^image\//.test(mime || "");
+
+  // A message as pieces: the files and pasted attachments first (they come before the words), then the content in order.
+  function pieces(m) {
+    const origin = m.sender === "human" ? "uploaded" : "generated";
+    const out = [], seen = new Set();
+    for (const f of Array.isArray(m.files) ? m.files : []) {
+      if (!isObj(f)) continue;
+      const asset = isObj(f.original_asset) ? f.original_asset.url : f.original_asset;
+      if (typeof f.file_uuid === "string") seen.add(f.file_uuid);
+      out.push(C.makeItem({ id: f.file_uuid, kind: isImage(f.file_kind, f.media_type) ? "image" : "file", origin, name: f.file_name, mime: f.media_type, size: f.size_bytes,
+        width: isObj(f.original_asset) ? f.original_asset.image_width : null, height: isObj(f.original_asset) ? f.original_asset.image_height : null,
+        pointer: typeof asset === "string" && asset ? asset : null }));   // the original only: a preview_url is a thumbnail, never saved as the file
+    }
+    // shortcut: pasted-text attachments keep only their extract on the site; they are marked, and listed as missing when saving
+    for (const a of Array.isArray(m.attachments) ? m.attachments : []) {
+      if (isObj(a)) out.push(C.makeItem({ id: a.id, kind: "file", origin, name: a.file_name, mime: a.file_type, size: a.file_size }));
+    }
+    const blocks = Array.isArray(m.content) ? m.content.filter(isObj) : [];
+    const words = blocks.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n");
+    const useBlocks = words.trim() !== "";
+    if (!useBlocks && typeof m.text === "string") out.push(m.text);
+    for (const b of blocks) {
+      if (b.type === "text" && typeof b.text === "string") { if (useBlocks) out.push(b.text); }
+      else if (b.type === "image" && !(typeof b.file_uuid === "string" && seen.has(b.file_uuid))) {
+        const src = isObj(b.source) ? b.source : {};
+        out.push(C.makeItem({ id: b.file_uuid, kind: "image", origin, mime: src.media_type, pointer: src.type === "url" ? src.url : null }));
+      }
+    }
+    return out;
   }
 
   // siteResponse: {uuid, name, current_leaf_message_uuid, chat_messages: [{uuid, sender, parent_message_uuid, content|text, created_at}]}
@@ -35,9 +63,9 @@
       const m = byId.get(id);
       if (m.streaming === true || m.status === "in_progress" || m.status === "streaming") streaming = true;   // shortcut: field names unverified live
       const role = m.sender === "human" ? "user" : m.sender === "assistant" ? "assistant" : null;
-      const t = text(m);
-      if (!role || !t.trim()) continue;
-      messages.push({ id, role, text: t, created_at: typeof m.created_at === "string" ? m.created_at : null });
+      const r = C.renderPieces(pieces(m));
+      if (!role || !r.text.trim()) continue;
+      messages.push(C.message(id, role, r.text, typeof m.created_at === "string" ? m.created_at : null, r.items));
       branch.push(id);
     }
     const reason = !top ? "the earliest turns of this chat are missing" : streaming ? "this chat is still being written; wait for it to finish"
@@ -65,5 +93,16 @@
     throw lastErr || new Error("claude.ai gave no organisation; are you logged in?");
   }
 
-  return { toEnvelope, fetchConversation };
+  // One item's original, from the path the chat itself names, on claude.ai only. shortcut: unverified live.
+  async function fetchAttachment(item, conversationId, env) {
+    const e = env || {};
+    const doFetch = e.fetch || ((...a) => globalThis.fetch(...a));
+    if (!item || !item.pointer) throw new Error("the site keeps no original for this item");
+    const u = C.sameOriginUrl(item.pointer, e.origin || location.origin);
+    if (!u) throw new Error("this item's address is not on claude.ai");
+    const got = await C.getBytes(doFetch, u.href, { credentials: "include" });
+    return { bytes: got.bytes, mime: got.mime || item.mime };
+  }
+
+  return { toEnvelope, fetchConversation, fetchAttachment };
 });

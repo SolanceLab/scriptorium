@@ -20,7 +20,10 @@
     {
       "id": "m3",
       "role": "assistant",
-      "text": "retried answer\n[image]",
+      "text": "retried answer\n[image: generated · 1]",
+      "attachments": [
+        {"id": null, "kind": "image", "origin": "generated", "name": null, "mime": null, "size": null, "width": null, "height": null, "pointer": null}
+      ],
       "created_at": "2026-11-20T10:01:00Z"
     },
     {

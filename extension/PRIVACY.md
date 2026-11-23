@@ -6,6 +6,8 @@ Scriptorium Export collects no data. It has no server, no account, no analytics,
 
 **What it does.** When you click Export on a claude.ai, chatgpt.com or grok.com conversation page, the extension reads that one open conversation from the page you are logged in to, shows you a preview, and, only when you click Save, writes it as a file on your computer through your browser's download dialog.
 
+**Attachments.** Only if you click Save attachments, the extension also downloads that one chat's own images and files from the site (or from the download address the site gives for each file), one at a time, into a zip on your computer.
+
 **What it transmits.** Nothing. The only network requests are the page's own requests to the site you are on, made to read the one conversation you opened, with your existing login. Nothing is sent to us or to anyone else.
 
 **What it stores.** Nothing. It keeps no copy, no history and no settings; the file you save is yours.

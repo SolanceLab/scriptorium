@@ -8,20 +8,40 @@
 })(globalThis, function (C) {
   const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
-  // The words of a message's content; a short placeholder stands for each part that is not text.
-  function text(content) {
-    if (!isObj(content)) return "";
-    if (Array.isArray(content.parts) && content.parts.length) {
-      const out = [];
-      for (const p of content.parts) {
+  // "sediment://file_00..." or "file-service://file-..." -> the file id the download endpoint takes, or null.
+  function fileId(pointer) {
+    const m = typeof pointer === "string" ? /^(?:sediment|file-service):\/\/(.+)$/.exec(pointer) : null;
+    return m ? m[1] : null;
+  }
+  const uploadsOf = (meta) => (Array.isArray(meta.attachments) ? meta.attachments.filter(isObj) : []);
+
+  // A message's content as pieces: words, and each non-text part as an item at its place (see common.js renderPieces).
+  // `uploads` is the user message's metadata.attachments; one that matches a part gives that part its name.
+  function pieces(content, origin, uploads) {
+    if (!isObj(content)) content = {};
+    if (Array.isArray(content.parts) && content.parts.length || uploads.length) {   // uploads count even when the parts are empty
+      const out = [], used = new Set();
+      if (!(Array.isArray(content.parts) && content.parts.length) && typeof content.text === "string") out.push(content.text);
+      for (const p of Array.isArray(content.parts) ? content.parts : []) {
         if (typeof p === "string") out.push(p);
         else if (isObj(p) && typeof p.text === "string") out.push(p.text);
-        else if (isObj(p) && (p.content_type === "image_asset_pointer" || p.content_type === "audio_asset_pointer")) out.push(p.content_type.startsWith("image") ? "[image]" : "[audio]");
-        else if (p !== null && p !== undefined) out.push("[attachment]");
+        else if (isObj(p) && p.content_type === "audio_asset_pointer") out.push("[audio]");   // shortcut: audio is marked, not fetched
+        else if (isObj(p) && (p.content_type === "image_asset_pointer" || typeof p.asset_pointer === "string")) {
+          const id = fileId(p.asset_pointer), up = uploads.find((u) => id && u.id === id);
+          if (up) used.add(up);
+          out.push(C.makeItem({
+            id, kind: p.content_type === "image_asset_pointer" || /^image\//.test(p.mime_type || (up && up.mime_type) || "") ? "image" : "file", origin,
+            name: up && up.name, mime: p.mime_type || (up && up.mime_type), size: p.size_bytes ?? (up && up.size), width: p.width ?? (up && up.width),
+            height: p.height ?? (up && up.height), pointer: p.asset_pointer }));
+        } else if (p !== null && p !== undefined) out.push("[attachment]");
       }
-      return out.filter((s) => s.trim()).join("\n");
+      for (const u of uploads) {   // uploads that sit in no part (a PDF, a spreadsheet)
+        if (used.has(u)) continue;
+        out.push(C.makeItem({ id: u.id, kind: /^image\//.test(u.mime_type || "") ? "image" : "file", origin, name: u.name, mime: u.mime_type, size: u.size, width: u.width, height: u.height, pointer: u.library_file_id }));
+      }
+      return out;
     }
-    return typeof content.text === "string" ? content.text : "";   // "code" and "execution_output" carry `text`
+    return typeof content.text === "string" ? [content.text] : [];   // "code" and "execution_output" carry `text`
   }
 
   // siteResponse: {conversation_id|id, title, current_node, mapping: {node id: {id, parent, message}}}
@@ -33,36 +53,73 @@
     if (!byId.has(resp.current_node)) return C.changed(site, conversationId, exportedAt, resp, "current_node not in mapping");
     const { path, top } = C.walkBranch(byId, resp.current_node, (id) => byId.get(id).parent);
     const messages = [], branch = [];
-    let streaming = false;
+    let streaming = false, pending = [];
     for (const nid of path) {
       const m = byId.get(nid).message;
       if (!isObj(m)) continue;
       const role = isObj(m.author) ? m.author.role : null;
       const meta = isObj(m.metadata) ? m.metadata : {};
       if (m.status === "in_progress" && role === "assistant") streaming = true;
+      if (role === "tool" && isObj(m.content) && m.content.content_type === "multimodal_text") {   // a generated image: it belongs to the next assistant turn
+        pending.push(...pieces(m.content, "generated", []).filter((p) => typeof p !== "string"));
+        continue;
+      }
       if ((role !== "user" && role !== "assistant") || meta.is_visually_hidden_from_conversation) continue;
       if (m.recipient !== undefined && m.recipient !== null && m.recipient !== "all") continue;   // a tool call, not a chat turn
-      const t = text(m.content);
-      if (!t.trim()) continue;
+      if (role === "user" && pending.length) {   // a generated image whose turn had no written reply: it stays with that turn, never the next one
+        const r0 = C.renderPieces(pending), prev = branch.length ? branch[branch.length - 1] : nid;
+        messages.push(C.message("tool-" + prev, "assistant", r0.text, null, r0.items));
+        branch.push("tool-" + prev); pending = [];
+      }
+      const ps = pieces(m.content, role === "user" ? "uploaded" : "generated", role === "user" ? uploadsOf(meta) : []);
+      const r = C.renderPieces(role === "assistant" ? pending.concat(ps) : ps);
+      if (!r.text.trim()) continue;
+      if (role === "assistant") pending = [];
       const mid = typeof m.id === "string" && m.id ? m.id : nid;
-      messages.push({ id: mid, role, text: t, created_at: C.isoFromEpoch(m.create_time) });
+      messages.push(C.message(mid, role, r.text, C.isoFromEpoch(m.create_time), r.items));
       branch.push(mid);
+    }
+    if (pending.length) {   // the branch ends at a generated image: keep it as its own assistant turn
+      const r = C.renderPieces(pending), last = path[path.length - 1];
+      messages.push(C.message("tool-" + last, "assistant", r.text, null, r.items));
+      branch.push("tool-" + last);
     }
     const reason = !top ? "the earliest turns of this chat are missing" : streaming ? "this chat is still being written; wait for it to finish"
       : messages.length === 0 ? "nothing to save: no messages found" : null;
     return C.envelope({ site, id: conversationId, title: resp.title, exportedAt, complete: !reason, reason, branch, messages, raw: resp });
   }
 
-  async function getJson(url, headers) {
-    const r = await fetch(url, { credentials: "include", headers: Object.assign({ Accept: "application/json" }, headers) });
+  async function getJson(url, headers, doFetch) {
+    const r = await (doFetch || ((...a) => globalThis.fetch(...a)))(url, { credentials: "include", headers: Object.assign({ Accept: "application/json" }, headers) });
     if (!r.ok) throw new Error("chatgpt.com answered " + r.status + " for " + new URL(url, location.href).pathname.replace(/[0-9a-f-]{36}/g, ":id"));
     return r.json();
   }
-  async function fetchConversation(id) {
-    const session = await getJson("/api/auth/session");
+  async function token(doFetch) {
+    const session = await getJson("/api/auth/session", undefined, doFetch);
     if (!session || typeof session.accessToken !== "string") throw new Error("chatgpt.com gave no access token; are you logged in?");
-    return getJson("/backend-api/conversation/" + encodeURIComponent(id), { Authorization: "Bearer " + session.accessToken });
+    return session.accessToken;
+  }
+  async function fetchConversation(id) {
+    return getJson("/backend-api/conversation/" + encodeURIComponent(id), { Authorization: "Bearer " + await token() });
   }
 
-  return { toEnvelope, fetchConversation };
+  // One item's original: ask chatgpt.com for its download address, then fetch that address. Only this chat's own file id is asked for.
+  // shortcut: unverified live; a signed address on another host is fetched without credentials, and may need CORS to allow it.
+  async function fetchAttachment(item, conversationId, env) {
+    const e = env || {};
+    const doFetch = e.fetch || ((...a) => globalThis.fetch(...a));
+    const origin = e.origin || location.origin;
+    if (!item || !item.id) throw new Error("this item has no file id");
+    const auth = { Authorization: "Bearer " + await token(doFetch) };
+    const meta = await getJson("/backend-api/files/download/" + encodeURIComponent(item.id) + "?conversation_id=" + encodeURIComponent(conversationId) + "&inline=false", auth, doFetch);
+    let u;
+    const addr = isObj(meta) ? meta.download_url : null;
+    try { u = typeof addr === "string" && addr ? new URL(addr, origin) : null; } catch (err) { u = null; }
+    if (!u || u.protocol !== "https:") throw new Error("chatgpt.com gave no download address");
+    const mine = u.origin === origin;
+    const got = await C.getBytes(doFetch, u.href, mine ? { credentials: "include", headers: auth } : { credentials: "omit" });
+    return { bytes: got.bytes, mime: got.mime || item.mime };
+  }
+
+  return { toEnvelope, fetchConversation, fetchAttachment, fileId };
 });

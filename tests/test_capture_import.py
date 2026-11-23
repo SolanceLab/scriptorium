@@ -75,6 +75,20 @@ class CaptureFile(Base):
         got = cf.read_capture(self.put(capture(raw={"x": 1})))
         self.assertEqual((got["site"], got["conversation_id"], len(got["messages"])), ("chatgpt", "abc", 2))
 
+    def test_attachments_field_is_accepted_and_ignored_and_the_zip_is_not_a_capture(self):
+        att = [{"id": "f1", "kind": "image", "origin": "generated", "name": None, "pointer": "sediment://f1"}]
+        m2 = msg("assistant", "[image: generated · 1]\nhi", "m2")
+        m2["attachments"] = att
+        self.put(capture(messages=[msg("user", "hello there friend", "m1"), m2]))
+        zip_name = "capture-chatgpt-abc-attachments.zip"
+        self.assertIsNone(cf.parse_name(zip_name))
+        with open(os.path.join(self.root, zip_name), "wb") as f:
+            f.write(b"PK\x05\x06" + b"\0" * 18)
+        self.assertEqual([m["text"] for m in cf.read_capture(os.path.join(self.root, cf.capture_name("chatgpt", "abc")))["messages"]],
+                         ["hello there friend", "[image: generated · 1]\nhi"])
+        rep = self.run_import()
+        self.assertEqual((rep["error"], rep["written"]), ([], 2))
+
     def test_bad_files_give_a_clear_error_naming_the_file(self):
         cases = {"schema": capture(schema_version=2), "site": capture(site="gemini"),
                  "id": capture(conversation_id=""), "incomplete": capture(complete=False),

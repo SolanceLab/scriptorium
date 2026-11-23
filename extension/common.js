@@ -69,6 +69,48 @@
     return { path: path.reverse(), top };
   }
 
+  // Non-text items. One item = {id, kind: image|file, origin: uploaded|generated, name, mime, size, width, height, pointer}
+  // (every field text/number or null). The readers build a message from "pieces": a string (words) or an item (stands at its place).
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const txt = (v) => (typeof v === "string" && v.trim() ? v : null);
+  function makeItem(o) {
+    return {
+      id: txt(o.id), kind: o.kind === "image" ? "image" : "file", origin: o.origin === "generated" ? "generated" : "uploaded",
+      name: txt(o.name), mime: txt(o.mime), size: num(o.size), width: num(o.width), height: num(o.height), pointer: txt(o.pointer),
+    };
+  }
+  // The short marker left in the text at the item's place; n is its 1-based place among the message's items.
+  function itemMarker(item, n) {
+    return item.kind === "image" ? "[image: " + item.origin + " · " + (item.name || n) + "]" : "[file: " + (item.name || n) + " · " + (item.mime || "unknown") + "]";
+  }
+  // pieces -> {text, items}: words stay, each item becomes its marker on its own line, blank words drop.
+  function renderPieces(pieces) {
+    const lines = [], items = [];
+    for (const p of pieces) {
+      if (typeof p === "string") { if (p.trim()) lines.push(p); }
+      else if (p) { items.push(p); lines.push(itemMarker(p, items.length)); }
+    }
+    return { text: lines.join("\n"), items };
+  }
+  // A saved message: `attachments` is an optional field, present only when the message has items.
+  function message(id, role, text, createdAt, items) {
+    const m = { id, role, text, created_at: createdAt };
+    if (items && items.length) m.attachments = items;
+    return m;
+  }
+
+  // GET one file's bytes: {bytes: Uint8Array, mime}. The error names the path with ids hidden, never the signed query.
+  async function getBytes(doFetch, url, init) {
+    const r = await doFetch(url, Object.assign({ method: "GET" }, init));
+    if (!r.ok) throw new Error(new URL(url, "https://x.invalid").pathname.replace(/[0-9a-f-]{36}/g, ":id").slice(0, 60) + " answered " + r.status);
+    const ct = r.headers && typeof r.headers.get === "function" ? r.headers.get("content-type") : null;
+    return { bytes: new Uint8Array(await r.arrayBuffer()), mime: ct ? ct.split(";")[0].trim() : null };
+  }
+  // The url as an https address on `origin` (a path or a full address), or null when it points anywhere else.
+  function sameOriginUrl(url, origin) {
+    try { const u = new URL(url, origin); return u.protocol === "https:" && u.origin === origin ? u : null; } catch (e) { return null; }
+  }
+
   function preview(env) {
     return { site: env.site, title: env.title, count: env.messages.length, complete: env.complete === true, reason: env.reason || null };
   }
@@ -101,5 +143,5 @@
   // Runs fn at most once (revoking a blob URL on complete, on interrupt and on unload: only the first counts).
   function once(fn) { let done = false; return (...a) => { if (done) return false; done = true; fn(...a); return true; }; }
 
-  return { canSave, captureBlob, captureFilename, exportPagePath, tabIdFromSearch, downloadOutcome, once, SCHEMA_VERSION, SITES, CHANGED, encodeId, captureName, parseConversationUrl, isoFromEpoch, nowIso, envelope, changed, walkBranch, preview };
+  return { getBytes, sameOriginUrl, makeItem, itemMarker, renderPieces, message, canSave, captureBlob, captureFilename, exportPagePath, tabIdFromSearch, downloadOutcome, once, SCHEMA_VERSION, SITES, CHANGED, encodeId, captureName, parseConversationUrl, isoFromEpoch, nowIso, envelope, changed, walkBranch, preview };
 });

@@ -31,6 +31,7 @@
         "sites/claude.js",
         "sites/chatgpt.js",
         "sites/grok.js",
+        "attachments.js",
         "content.js"
       ],
       "run_at": "document_idle"

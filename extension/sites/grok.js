@@ -20,6 +20,20 @@
     return null;
   }
 
+  // The assets a response shows, only from the fields it carries (an id, or an object with an id and maybe a name and type).
+  // shortcut: field names unverified live; add the real ones once a Grok chat with files has been seen.
+  function assetItems(x, origin) {
+    const out = [];
+    for (const key of ["file_attachments", "image_attachments", "asset_ids", "generated_image_ids"]) {
+      for (const a of Array.isArray(x[key]) ? x[key] : []) {
+        const o = isObj(a) ? a : { id: a };
+        const mime = o.mime_type || o.mime || null;
+        out.push(C.makeItem({ id: o.id || o.file_id || o.asset_id, kind: key.includes("image") || /^image\//.test(mime || "") ? "image" : "file", origin, name: o.name || o.file_name, mime, size: o.size }));
+      }
+    }
+    return out;
+  }
+
   // siteResponse: {conversation: {id, title, leaf_response_id}, responses: [{response: {_id, message, sender, parent_response_id, create_time}}]}
   function toEnvelope(resp, conversationId, exportedAt) {
     const site = "grok";
@@ -45,8 +59,10 @@
     for (const id of path) {
       const x = byId.get(id);
       if (x.partial === true || x.streaming === true) streaming = true;   // shortcut: field names unverified live
-      if (typeof x.message === "string" && x.message.trim()) {
-        messages.push({ id, role: x.sender === "human" ? "user" : "assistant", text: x.message, created_at: C.isoFromEpoch(epoch(x.create_time)) });
+      const role = x.sender === "human" ? "user" : "assistant";
+      const r = C.renderPieces([typeof x.message === "string" ? x.message : "", ...assetItems(x, role === "user" ? "uploaded" : "generated")]);
+      if (r.text.trim()) {
+        messages.push(C.message(id, role, r.text, C.isoFromEpoch(epoch(x.create_time)), r.items));
         branch.push(id);
       }
     }
@@ -86,5 +102,9 @@
     return { unavailable: "none of the requests Grok made for this chat gave its messages (unverified reader)" };
   }
 
-  return { toEnvelope, fetchConversation, candidateUrls };
+  async function fetchAttachment() {
+    throw new Error("Grok attachments cannot be saved yet (the download address is not confirmed)");
+  }
+
+  return { toEnvelope, fetchConversation, fetchAttachment, candidateUrls };
 });

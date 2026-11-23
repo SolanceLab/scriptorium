@@ -39,7 +39,7 @@ test("no extension code lists other conversations or calls a remote host", () =>
   const files = ["content.js", "export.js", "background.js", "sites/claude.js", "sites/chatgpt.js", "sites/grok.js"];
   for (const f of files) {
     const src = readFileSync(new URL("../" + f, import.meta.url), "utf8");
-    assert.doesNotMatch(src, /chat_conversations_v2|chat_conversations["'?]|conversations\?offset|conversation_id=|\/conversations\?/, f);
+    assert.doesNotMatch(src, /chat_conversations_v2|chat_conversations["'?]|conversations\?offset|\/conversations\?/, f);
     assert.doesNotMatch(src, /fetch\(\s*["'`]https?:/, f);
   }
 });

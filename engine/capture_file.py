@@ -6,7 +6,8 @@ site's conversation id, percent-encoded so any id gives one safe filename and th
 
     {"schema_version": 1, "site": "chatgpt" | "claude" | "grok", "conversation_id": "...", "title": "...",
      "exported_at": "ISO time", "complete": true, "branch": ["message id", ...],
-     "messages": [{"id": "optional", "role": "user" | "assistant", "text": "...", "created_at": "optional"}],
+     "messages": [{"id": "optional", "role": "user" | "assistant", "text": "...", "created_at": "optional",
+                  "attachments": [optional: the non-text items of the message; the importer ignores them]}],
      "raw": {the site's own conversation object, kept for later, never read by the importer}}
 
 `read_capture` returns the checked file or raises CaptureError, whose message names the file. It never crashes on
