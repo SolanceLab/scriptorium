@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 — 23 November 2026
 
 Journal append (`docs/pen.md`, `docs/your-own-store.md`): `journal_write` gains an optional `append: true` flag for running daily logs and safe concurrent notes. Without `id`, it appends to today's entry (in `SCRIPTORIUM_PEN_TZ`) in a `by_day` journal, creating it if absent (titled from the call or the day) and refusing flat journals; with `id`, it appends to that entry. New body text is added after a blank line, declared fields merge (lists add new items in order without duplicates, objects merge key by key, text/number/boolean replace only when given), the key's `surface` is stamped, and the reply reports `action` (`appended` or `created`), `id`, and `version`. Stores implement `append()` atomically (writer lock in `LocalFilesPenStore`, single transaction in `SqlPenStore` / Durable Object; custom stores must implement it or append is refused rather than emulated by read-then-edit), and `X-Request-Id` retries never add the text twice.
 

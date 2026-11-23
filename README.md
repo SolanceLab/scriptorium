@@ -28,7 +28,7 @@ claude plugin install scriptorium@solancelab
 
 Once the key is bound, your AI can write in its journal. To generate chat notes, put your `conversations.json` in `~/scriptorium` and ask your AI to write notes from it. Installing the plugin and starting the server do not generate notes. The writer runs when called explicitly or through automation you set up. In Codex: [docs/codex.md](docs/codex.md).
 
-Prefer not to keep a computer on? The journal tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md).
+Prefer not to keep a computer on? The journal tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md). Already keep your data in your own database? The cloud server can write to it instead of its built-in storage: [docs/your-own-store.md](docs/your-own-store.md).
 
 ## What it is
 
@@ -63,7 +63,7 @@ Everything runs on your own computer. Your conversations go only to the model yo
 | Tool | What it does |
 |---|---|
 | `journals` | Lists your AI's journals, the fields each declares, and how many entries each holds. |
-| `journal_write` | Writes a new entry into a journal; the first write creates it. |
+| `journal_write` | Writes a new entry into a journal; the first write creates it. With `append: true` it adds to today's entry (or the entry you name) instead, so a daily log grows in one place and two AIs writing at once never lose each other's text. |
 | `journal_edit` | Revises an entry; the earlier version is kept. |
 | `journal_read` | Reads the current version of an entry. |
 | `journal_list` | Lists a journal's entries, newest first; pinned only, or one day. |
