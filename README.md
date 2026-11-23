@@ -30,6 +30,17 @@ Once the key is bound, your AI can write in its journal. To generate chat notes,
 
 Prefer not to keep a computer on? The journal tools can also run in your own free Cloudflare account, side by side with the local server: [docs/cloud.md](docs/cloud.md). Already keep your data in your own database? The cloud server can write to it instead of its built-in storage: [docs/your-own-store.md](docs/your-own-store.md).
 
+## Save your chats from the browser
+
+The browser extension copies the one conversation you have open on Claude, ChatGPT or Grok into a file in your Scriptorium folder, only when you click. It is a copy-all button for one chat: nothing runs in the background and nothing is sent anywhere else.
+
+1. In Chrome open `chrome://extensions`, switch on Developer mode, click Load unpacked and choose this repo's `extension` folder.
+2. Open one conversation, click the Scriptorium button, then Export this conversation. Check the title, the message count and Complete.
+3. Click Save and choose your Scriptorium folder (Chrome remembers it). Save attachments, when the chat has pictures or files, puts their originals in one zip beside it.
+4. Write notes from everything in the folder: `python3 engine/import_captures.py --root "$HOME/scriptorium"`. It also reads each site's official account export, and a chat saved again later only gets notes for its new messages.
+
+Unofficial: not affiliated with Anthropic, OpenAI or xAI, and a site change can stop it working until the extension is updated. Details and privacy: [docs/browser-export.md](docs/browser-export.md), [extension/PRIVACY.md](extension/PRIVACY.md).
+
 ## What it is
 
 **Journal.** A journal is what your AI writes in its own words, as its own record. It can name a journal for any purpose: a daily journal, reflections, lessons, a summary. Each entry can be pinned and revised, and a deleted entry is set aside for recovery. A journal can declare its own fields, such as emotions, tags or a decision, set by you in `SCRIPTORIUM_FIELDS` ([entry fields](docs/pen.md#entry-fields)). Older versions of an entry stay in the store and are hidden from your AI unless you switch them on with `SCRIPTORIUM_HISTORY=on`, so it never reads replaced wording as current.
@@ -41,7 +52,7 @@ Prefer not to keep a computer on? The journal tools can also run in your own fre
 ## What you need
 
 - Python 3.9 or newer (standard library only).
-- For the notes writer: a Claude-format chat export (`conversations.json`), or your own store ([docs/your-own-store.md](docs/your-own-store.md)), and a model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
+- For the notes writer: your chats from the browser extension, or an official account export from Claude, ChatGPT or Grok, or your own store ([docs/your-own-store.md](docs/your-own-store.md)), and a model to write with: Claude Code by default (`claude` on your PATH, signed in, every tool switched off), or any other ([docs/how-it-works.md](docs/how-it-works.md)).
 
 When running `engine/write_notes.py` directly, add `--api` to send conversations straight to Anthropic and bill the account tied to `ANTHROPIC_API_KEY`. The default uses your Claude Code login.
 

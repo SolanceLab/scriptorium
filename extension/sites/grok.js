@@ -84,7 +84,10 @@
       if (!isObj(x) || typeof x.responseId !== "string" || !x.responseId) return C.changed(site, conversationId, exportedAt, resp, "unexpected response");
       byId.set(x.responseId, x);
     }
-    const parentOf = new Map(nodes.map((n) => [n.responseId, n.parentResponseId]));
+    // response-node returns the whole tree, so a parent that is not one of its nodes (empty, or an id Grok keeps
+    // outside the tree) marks the first message; it is never missing history.
+    const nodeIds = new Set(nodes.map((n) => n.responseId));
+    const parentOf = new Map(nodes.map((n) => [n.responseId, nodeIds.has(n.parentResponseId) ? n.parentResponseId : null]));
     const times = new Map(resp.responses.map((x) => [x.responseId, epoch(x.createTime)]));
     const leaf = typeof resp.leaf === "string" && parentOf.has(resp.leaf) ? resp.leaf : pickLeaf(nodes, resp.rid, times);
     const inflight = Array.isArray(resp.inflight) && resp.inflight.length > 0;

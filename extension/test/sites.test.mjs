@@ -181,3 +181,15 @@ test("grok: streaming reply is incomplete; image-only reply kept; file names nev
   const names = f.messages.find((m) => m.role === "assistant").attachments.map((x) => x.name);
   assert.equal(names.filter((n) => n === "b.pdf").length, 1, "only file b is called b.pdf");
 });
+
+test("grok: the first message's parent outside the tree is the start, not missing history", () => {
+  const G = createRequire(import.meta.url)("../sites/grok.js");
+  const toEnv = G.toEnvelope || (G.grok && G.grok.toEnvelope);
+  const resp = { title: "t", inflight: [], rid: "a1",
+    nodes: [{ responseId: "u1", sender: "human", parentResponseId: "hidden-root" }, { responseId: "a1", sender: "assistant", parentResponseId: "u1" }],
+    responses: [{ responseId: "u1", sender: "human", message: "hi", parentResponseId: "hidden-root", createTime: "2026-11-23T00:00:00Z" },
+      { responseId: "a1", sender: "assistant", message: "hello", parentResponseId: "u1", createTime: "2026-11-23T00:00:01Z" }] };
+  const env = toEnv(resp, "c", "2026-11-23T00:00:02Z");
+  assert.equal(env.complete, true, env.reason);
+  assert.equal(env.messages.length, 2);
+});
