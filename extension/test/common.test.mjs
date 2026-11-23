@@ -20,7 +20,7 @@ test("only a single conversation page is accepted", () => {
   assert.deepEqual(ok("https://chatgpt.com/c/69a1"), { site: "chatgpt", id: "69a1" });
   assert.deepEqual(ok("https://grok.com/chat/g1"), { site: "grok", id: "g1" });
   assert.deepEqual(ok("https://grok.com/c/g2/"), { site: "grok", id: "g2" });
-  for (const bad of ["https://claude.ai/recents", "https://claude.ai/chat/", "https://claude.ai/chat/a/b", "https://chatgpt.com/", "https://chatgpt.com/g/g-x/c/1",
+  for (const bad of ["https://claude.ai/recents", "https://claude.ai/chat/", "https://claude.ai/chat/a/b", "https://chatgpt.com/", "https://chatgpt.com/g/g-x", "https://chatgpt.com/g/g-x/c/1/extra",
     "https://chatgpt.com/c/1/extra", "http://claude.ai/chat/a", "https://evil.example/chat/a", "https://claude.ai.evil.example/chat/a", "not a url", "https://grok.com/c/%E0%A4%A"]) {
     assert.equal(ok(bad), null, bad);
   }
@@ -28,7 +28,7 @@ test("only a single conversation page is accepted", () => {
 
 test("manifest holds only the three sites and the three permissions", () => {
   assert.deepEqual([...manifest.host_permissions].sort(), ["https://chatgpt.com/*", "https://claude.ai/*", "https://grok.com/*"]);
-  assert.deepEqual([...manifest.permissions].sort(), ["activeTab", "downloads"]);
+  assert.deepEqual([...manifest.permissions].sort(), ["activeTab", "downloads", "scripting"]);
   assert.equal(manifest.manifest_version, 3);
   assert.deepEqual(manifest.background, { service_worker: "background.js" });   // only to open the export window
   assert.equal(manifest.action.default_popup, undefined);
@@ -90,3 +90,11 @@ import { createRequire as _cr } from "node:module";
     assertM.default.equal(common.captureFilename(env), "capture-claude-a~b.json");
   });
 }
+
+test("ChatGPT chats inside a project or a custom GPT are recognised", () => {
+  const parse = C.parseConversationUrl;
+  assert.deepEqual(parse("https://chatgpt.com/g/g-p-6912abc-public-ledger/c/6af71691-f6fc-83ec-a904-5489b9502cfc"), { site: "chatgpt", id: "6af71691-f6fc-83ec-a904-5489b9502cfc" });
+  assert.deepEqual(parse("https://chatgpt.com/g/g-abc123-my-gpt/c/abc-1"), { site: "chatgpt", id: "abc-1" });
+  assert.deepEqual(parse("https://chatgpt.com/c/abc-1"), { site: "chatgpt", id: "abc-1" });
+  assert.equal(parse("https://chatgpt.com/g/g-p-6912abc-public-ledger/project"), null);
+});

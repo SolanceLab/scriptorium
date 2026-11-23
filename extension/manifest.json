@@ -5,7 +5,8 @@
   "description": "Unofficial. Copies the one conversation you have open on Claude, ChatGPT or Grok into a file on your computer, only when you click.",
   "permissions": [
     "activeTab",
-    "downloads"
+    "downloads",
+    "scripting"
   ],
   "background": {
     "service_worker": "background.js"

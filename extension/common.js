@@ -19,7 +19,7 @@
   // One conversation page only: the site and the conversation id, or null (a list, a project, a settings page...).
   const PAGES = [
     ["claude", "claude.ai", /^\/chat\/([^/]+)$/],
-    ["chatgpt", "chatgpt.com", /^\/c\/([^/]+)$/],
+    ["chatgpt", "chatgpt.com", /^(?:\/g\/[^/]+)?\/c\/([^/]+)$/],   // plain chats, and chats inside a project or a custom GPT
     ["grok", "grok.com", /^\/(?:chat|c)\/([^/]+)$/],
   ];
   function parseConversationUrl(url) {
