@@ -39,8 +39,19 @@ try:
 except ImportError:      # shortcut: no file lock on Windows; run one import at a time there
     fcntl = None
 
+CONTEXT_TURNS = 10        # earlier turns (a user message plus its reply) shown to the writer as context
+def _context_chars_default():
+    raw = os.environ.get("SCRIPTORIUM_CONTEXT_CHARS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 40000      # a mistyped value falls back instead of crashing
+    return value if value > 0 else 40000
+
+
 STATE_DIR = ".scriptorium-import"
 CHATGPT_EXPORT = "chatgpt-conversations.json"
+CONTEXT_CHARS = _context_chars_default()   # cap on those turns' raw text
 EXPORT = "conversations.json"
 ADOPTED = "notes exist for this chat but this importer has no record of them; move them away or remove the notes file to import it from the start"
 
@@ -220,6 +231,37 @@ def _conv_dict(cid, title, batch):
     return conv
 
 
+def _context(state, source, batch, existing, max_chars):
+    """Context for a re-export, or None on a first export: every earlier note, plus the last CONTEXT_TURNS turns of
+    already-processed messages that come just before the batch (the most recent that fit max_chars)."""
+    if not state["processed"]:
+        return None
+    msgs, first = source["messages"], None
+    ids = {m["id"] for m in batch}
+    for i, m in enumerate(msgs):
+        if m["id"] in ids:
+            first = i
+            break
+    earlier = [m for m in msgs[:first] if _is_done(state, m)] if first is not None else []
+    turns = []
+    for m in earlier:                                  # a turn starts at each user message
+        if m["role"] == "user" or not turns:
+            turns.append([])
+        turns[-1].append(m)
+    turns = turns[-CONTEXT_TURNS:]
+    kept, size = [], 0
+    for t in reversed(turns):
+        n = sum(len(m["text"]) for m in t)
+        if size + n > max_chars:
+            break
+        kept.insert(0, t)
+        size += n
+    notes = [(f"{r.get('topic')}: " if r.get("topic") else "") + str(r["summary"])
+             for r in (existing or {}).get("memories") or [] if isinstance(r, dict) and r.get("summary")]
+    return {"notes": notes, "left_out": len(turns) - len(kept),
+            "turns": [(m["role"], m["text"]) for t in kept for m in t]}
+
+
 def _batches(notes):
     b = (notes or {}).get("batches")
     return b if isinstance(b, list) else []
@@ -262,7 +304,7 @@ def _missing(state, source):
     return sum(1 for r in state["processed"] if not any(m["id"] == r["id"] or m["ck"] == r["ck"] for m in msgs))
 
 
-def import_conversation(root, out, site, cid, source, write):
+def import_conversation(root, out, site, cid, source, write, context_chars=None):
     """Give notes to the new messages of one chat. Returns (status, detail): 'nothing new', 'written' or 'conflict'
     / 'error' with the reason. `write(conv)` is the notes writer (write_conversation with its settings)."""
     spath = _state_path(root, site, cid)
@@ -309,7 +351,11 @@ def import_conversation(root, out, site, cid, source, write):
                 if missing:
                     return "conflict", (f"{missing} message(s) already given notes are not in {source['from']} "
                                         f"any more; nothing was changed")
-                result = write(_conv_dict(cid, source["title"], batch))
+                conv = _conv_dict(cid, source["title"], batch)
+                ctx = _context(state, source, batch, existing, CONTEXT_CHARS if context_chars is None else context_chars)
+                if ctx and (ctx["notes"] or ctx["turns"] or ctx["left_out"]):
+                    conv["context"] = ctx                 # shortcut: context rides in the conv dict so every writer keeps its one-argument shape
+                result = write(conv)
                 if result.get("error"):
                     return "error", result["error"]
                 os.makedirs(out, exist_ok=True)
@@ -327,7 +373,7 @@ def _pending_current(state, source):
     return all((r["id"], r["ck"]) in have for r in state["pending"]["messages"])
 
 
-def import_root(root, out, write):
+def import_root(root, out, write, context_chars=None):
     """Import every chat in root. Returns {'written': n, 'nothing new': n, 'conflict': [...], 'error': [...]}."""
     if not os.path.isdir(root):
         raise SystemExit(f"{root}: not a folder")
@@ -335,7 +381,7 @@ def import_root(root, out, write):
     report = {"written": 0, "nothing new": 0, "conflict": [], "error": list(problems)}
     for (site, cid), sources in sorted(found.items()):
         try:
-            status, detail = import_conversation(root, out, site, cid, pick_source(sources), write)
+            status, detail = import_conversation(root, out, site, cid, pick_source(sources), write, context_chars)
         except LockedError as e:
             status, detail = "error", str(e)
         if status in ("conflict", "error"):
@@ -356,6 +402,8 @@ def main(argv=None):
     ap.add_argument("--user-name", default=os.environ.get("SCRIPTORIUM_USER_NAME"))
     ap.add_argument("--agent-name", default=os.environ.get("SCRIPTORIUM_AGENT_NAME"))
     ap.add_argument("--platform", default=os.environ.get("SCRIPTORIUM_PLATFORM"))
+    ap.add_argument("--context-chars", type=int, default=None,
+                    help=f"cap on the earlier turns shown as context on a re-export (default {CONTEXT_CHARS})")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--timezone", default=os.environ.get("MEMORY_WRITER_TZ") or None)
     a = ap.parse_args(argv)
@@ -380,7 +428,7 @@ def main(argv=None):
         return res
 
     out = a.out or os.path.join(a.root, "notes")
-    report = import_root(a.root, out, write)
+    report = import_root(a.root, out, write, a.context_chars)
     for kind in ("conflict", "error"):
         for line in report[kind]:
             print(f"{kind.upper()}: {line}", file=sys.stderr)

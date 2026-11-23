@@ -176,13 +176,34 @@ def calendar_block(date):
             f"Calendar (read relative dates off this list; do not compute them):\n" + "\n".join(rows) + "\n")
 
 
-def build_prompt(template, title, date, lines, *, builtin_prompt=False):
+def context_block(context_lines, context_notes=(), left_out=0, builtin_prompt=False):
+    """The marked, non-citable block of earlier material (a re-export). Its lines carry no ids, so nothing in it can be cited."""
+    out = ["Earlier in this conversation, already noted: context only, do not write notes about it, do not cite it."]
+    if context_notes:
+        out.append("Notes already written for this conversation:")
+        out += [f"- {n}" for n in context_notes]
+    if context_lines or left_out:
+        out.append("The turns just before the new messages:")
+        if left_out:
+            out.append(f"({left_out} earlier turn(s) left out to keep this short)")
+        for sender, text in context_lines:
+            out.append(f"{'agent' if builtin_prompt and sender == 'assistant' else sender}: {text}")
+    out.append("End of earlier context. The new messages follow; write notes only about these, citing their [ids].")
+    return "\n".join(out) + "\n\n"
+
+
+def build_prompt(template, title, date, lines, *, builtin_prompt=False, context_lines=None, context_notes=None,
+                 context_left_out=0):
+    """`context_lines` [(sender, text)] and `context_notes` [str] are optional earlier material shown as context only."""
     if builtin_prompt:
         lines = [(lid, "agent" if sender == "assistant" else sender, text, at)
                  for lid, sender, text, at in lines]
     body = "\n".join(f"[{lid}] {sender}: {text}" for lid, sender, text, _ in lines)
     cal = "" if builtin_prompt else calendar_block(date)
-    return f"{template}\n\n---\n\nSession: {title}\nSession date: {date}\n{cal}\n{body}\n"
+    ctx = ""
+    if context_lines or context_notes or context_left_out:
+        ctx = context_block(context_lines or [], context_notes or [], context_left_out, builtin_prompt)
+    return f"{template}\n\n---\n\nSession: {title}\nSession date: {date}\n{cal}\n{ctx}{body}\n"
 
 
 def _norm(s):
@@ -554,14 +575,38 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
         return unwrap(call_model(model_cmd, prompt, timeout))
 
     cid, title, lines = claude_lines(conv)
+    ctx = conv.get("context") if isinstance(conv.get("context"), dict) else {}
+    ckw = {"context_lines": [tuple(t) for t in ctx.get("turns") or []], "context_notes": list(ctx.get("notes") or []),
+           "context_left_out": int(ctx.get("left_out") or 0)}
     date = session_date(conv, lines, tz)
-    pieces = split_pieces(lines, date, max_chars, tz)
+    # The context rides on every call, so it may use at most half of each call's budget: the oldest earlier notes
+    # go first, then the oldest turns, and the block says how many were left out.
+    notes, turns, dropped = list(ckw["context_notes"]), list(ckw["context_lines"]), 0
+
+    def shown():
+        return {"context_notes": ([f"({dropped} earlier note(s) left out to keep this short)"] if dropped else []) + notes,
+                "context_lines": turns, "context_left_out": ckw["context_left_out"]}
+
+    has_ctx = bool(notes or turns or ckw["context_left_out"])
+    size = lambda: len(context_block(shown()["context_lines"], shown()["context_notes"], shown()["context_left_out"], builtin_prompt))
+    while has_ctx and size() > max_chars // 2:
+        if notes:
+            notes.pop(0); dropped += 1
+        elif turns:
+            turns.pop(0); ckw["context_left_out"] += 1
+        else:
+            break
+    if has_ctx and size() > max_chars // 2:      # even the bare wrapper does not fit: send no context at all
+        notes, turns, dropped, ckw["context_left_out"], has_ctx = [], [], 0, 0, False
+    ckw = shown()
+    ctx_size = size() if has_ctx else 0
+    pieces = split_pieces(lines, date, max_chars - ctx_size, tz)
     if len(pieces) > MAX_PIECES:
         return {"conversation_id": cid, "title": title, "session_date": date, "memories": [], "rejected": [],
                 "calls": [], "error": f"{len(pieces)} pieces (more than {MAX_PIECES}); nothing was sent to the model"}
     if len(pieces) == 1:
         date = pieces[0][0]       # the day its messages carry (the same as the conversation's, unless they differ)
-        kept, rejected, calls, err = _write_piece(title, date, lines, template, fetch, retries, builtin_prompt=builtin_prompt)
+        kept, rejected, calls, err = _write_piece(title, date, lines, template, fetch, retries, builtin_prompt=builtin_prompt, **ckw)
         out = {"conversation_id": cid, "title": title, "session_date": date, "memories": kept,
                "rejected": rejected, "calls": calls}
         if err is not None:
@@ -570,7 +615,7 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
     kept, rejected, calls, errors = [], [], [], []
     for i, (day, part) in enumerate(pieces, 1):
         k, r, c, err = _write_piece(f"{title} (part {i} of {len(pieces)})", day, part, template, fetch, retries,
-                                     builtin_prompt=builtin_prompt)
+                                     builtin_prompt=builtin_prompt, **ckw)
         kept += k
         rejected += r
         calls += [dict(x, piece=i) for x in c]
@@ -583,9 +628,9 @@ def write_conversation(conv, template, model_cmd, timeout, retries=1, max_chars=
     return out
 
 
-def _write_piece(title, date, lines, template, fetch, retries, *, builtin_prompt=False):
+def _write_piece(title, date, lines, template, fetch, retries, *, builtin_prompt=False, **context):
     """One model call (plus retries) for one piece: (kept, rejected, calls, error or None)."""
-    prompt = build_prompt(template, title, date, lines, builtin_prompt=builtin_prompt)
+    prompt = build_prompt(template, title, date, lines, builtin_prompt=builtin_prompt, **context)
     last_err = None
     calls = []
     for _ in range(retries + 1):
