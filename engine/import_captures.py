@@ -1,5 +1,5 @@
 # Scriptorium — Copyright (c) 2026 House of Solance. PolyForm Noncommercial 1.0.0. Required Notice: Copyright (c) 2026 House of Solance (https://github.com/SolanceLab)
-"""Import saved chats: capture files and account exports (Claude's or ChatGPT's conversations.json) in, notes for only the new messages out.
+"""Import saved chats: capture files and account exports (Claude's or ChatGPT's conversations.json, Grok's prod-grok-backend.json) in, notes for only the new messages out.
 
     python3 import_captures.py --root FOLDER [--out DIR] [--model M | --model-cmd "<command>"] [--prompt public]
 
@@ -31,6 +31,7 @@ import time
 
 import capture_file as cf
 import chatgpt_export as gpt
+import grok_export as grok
 import write_notes as wn
 
 try:
@@ -88,6 +89,11 @@ def _export_files(root):
     return names
 
 
+def _grok_files(root):
+    """Paths of prod-grok-backend.json under root (an unzipped Grok export, any depth); no other file of it is opened."""
+    return grok.find_backend(root)
+
+
 def find_sources(root):
     """({(site, id): [source, ...]}, [problem text]) from the capture files and conversations.json in root."""
     found, problems = {}, []
@@ -125,6 +131,22 @@ def find_sources(root):
                 continue
             if cid:
                 found.setdefault((site, cid), []).append(
+                    {"from": rel, "title": title, "messages": _prepare(msgs), "export": True})
+    for rel in _grok_files(root):
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                items = json.load(f)["conversations"]
+            if not isinstance(items, list):
+                raise ValueError("conversations is not a list")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            problems.append(f"{rel}: cannot be read ({e})")
+            continue
+        for item in items:
+            if not grok.is_grok(item) or item["conversation"].get("temporary") is True:
+                continue                                  # temporary chats were not meant to be kept
+            cid, title, msgs = grok.conversation_turns(item)
+            if cid:
+                found.setdefault(("grok", cid), []).append(
                     {"from": rel, "title": title, "messages": _prepare(msgs), "export": True})
     return found, problems
 
