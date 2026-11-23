@@ -15,79 +15,81 @@
       "id": "r1",
       "role": "user",
       "text": "hello there friend",
-      "created_at": "2026-11-20T10:00:00Z"
+      "created_at": "2026-11-23T10:00:00Z"
     },
     {
       "id": "r3",
       "role": "assistant",
       "text": "retried answer",
-      "created_at": "2026-11-20T10:01:00Z"
+      "created_at": "2026-11-23T10:01:00Z"
     },
     {
       "id": "r4",
       "role": "user",
       "text": "and again",
-      "created_at": "2026-11-20T10:02:00Z"
+      "created_at": "2026-11-23T10:02:00Z"
     }
   ],
   "raw": {
-    "conversation": {
-      "id": "g-1",
-      "title": "Branched chat",
-      "leaf_response_id": "r4"
-    },
+    "title": "Branched chat",
+    "rid": "r4",
+    "leaf": "r4",
+    "nodes": [
+      {
+        "responseId": "r1",
+        "sender": "human",
+        "parentResponseId": null
+      },
+      {
+        "responseId": "r2",
+        "sender": "ASSISTANT",
+        "parentResponseId": "r1"
+      },
+      {
+        "responseId": "r3",
+        "sender": "ASSISTANT",
+        "parentResponseId": "r1"
+      },
+      {
+        "responseId": "r4",
+        "sender": "human",
+        "parentResponseId": "r3"
+      }
+    ],
     "responses": [
       {
-        "response": {
-          "_id": "r1",
-          "message": "hello there friend",
-          "sender": "human",
-          "create_time": {
-            "$date": {
-              "$numberLong": "1795168800000"
-            }
-          }
-        }
+        "responseId": "r1",
+        "message": "hello there friend",
+        "sender": "human",
+        "parentResponseId": null,
+        "createTime": "2026-11-23T10:00:00Z",
+        "partial": false
       },
       {
-        "response": {
-          "_id": "r2",
-          "message": "first answer, later retried",
-          "sender": "ASSISTANT",
-          "parent_response_id": "r1",
-          "create_time": {
-            "$date": {
-              "$numberLong": "1795168805000"
-            }
-          }
-        }
+        "responseId": "r2",
+        "message": "first answer, later retried",
+        "sender": "ASSISTANT",
+        "parentResponseId": "r1",
+        "createTime": "2026-11-23T10:00:05Z",
+        "partial": false
       },
       {
-        "response": {
-          "_id": "r3",
-          "message": "retried answer",
-          "sender": "ASSISTANT",
-          "parent_response_id": "r1",
-          "create_time": {
-            "$date": {
-              "$numberLong": "1795168860000"
-            }
-          }
-        }
+        "responseId": "r3",
+        "message": "retried answer",
+        "sender": "ASSISTANT",
+        "parentResponseId": "r1",
+        "createTime": "2026-11-23T10:01:00Z",
+        "partial": false
       },
       {
-        "response": {
-          "_id": "r4",
-          "message": "and again",
-          "sender": "human",
-          "parent_response_id": "r3",
-          "create_time": {
-            "$date": {
-              "$numberLong": "1795168920000"
-            }
-          }
-        }
+        "responseId": "r4",
+        "message": "and again",
+        "sender": "human",
+        "parentResponseId": "r3",
+        "createTime": "2026-11-23T10:02:00Z",
+        "partial": false
       }
-    ]
+    ],
+    "inflight": []
   }
 }

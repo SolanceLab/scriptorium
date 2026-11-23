@@ -44,12 +44,19 @@ test("claude: files[] and image content are marked; a files-only message is kept
   assert.equal(env.messages[1].text, "[image: generated · 1]");
 });
 
-test("grok: only what the response shows is marked", () => {
-  const r = { conversation: { id: "g" }, responses: [{ response: { _id: "a", message: "q", sender: "human", file_attachments: [{ id: "x1", name: "n.txt", mime_type: "text/plain" }] } }] };
+test("grok: generated images, uploaded images and files are marked from the fields the response carries", () => {
+  const nodes = [{ responseId: "a", parentResponseId: null }, { responseId: "b", parentResponseId: "a" }];
+  const r = { title: "t", nodes, inflight: [], responses: [
+    { responseId: "a", message: "q", sender: "human", createTime: 1, imageAttachments: ["https://assets.grok.com/u/p.png"],
+      fileAttachments: ["f1"], fileUris: ["users/u/f1/content"], fileAttachmentsMetadata: [{ fileMetadataId: "f1", fileName: "n.txt", mimeType: "text/plain" }] },
+    { responseId: "b", message: "here", sender: "ASSISTANT", createTime: 2, generatedImageUrls: ["https://assets.grok.com/u/g.png"] }] };
   const env = grok.toEnvelope(r, "g", AT);
-  assert.equal(env.messages[0].text, "q\n[file: n.txt · text/plain]");
-  assert.equal(env.messages[0].attachments[0].id, "x1");
-  assert.equal(grok.toEnvelope({ conversation: { id: "g" }, responses: [{ response: { _id: "a", message: "q", sender: "human" } }] }, "g", AT).messages[0].attachments, undefined);
+  assert.equal(env.messages[0].text, "q\n[image: uploaded · 1]\n[file: n.txt · text/plain]");
+  assert.deepEqual(env.messages[0].attachments.map((x) => [x.kind, x.origin, x.name, x.pointer]), [["image", "uploaded", null, "https://assets.grok.com/u/p.png"], ["file", "uploaded", "n.txt", "https://assets.grok.com/users/u/f1/content"]]);
+  assert.equal(env.messages[1].text, "here\n[image: generated · 1]");
+  assert.equal(env.messages[1].attachments[0].pointer, "https://assets.grok.com/u/g.png");
+  const plain = { nodes: [{ responseId: "a", parentResponseId: null }], inflight: [], responses: [{ responseId: "a", message: "q", sender: "human", createTime: 1 }] };
+  assert.equal(grok.toEnvelope(plain, "g", AT).messages[0].attachments, undefined);
 });
 
 test("zip: Python's zipfile opens what the writer makes, and the CRCs match", () => {
@@ -116,7 +123,14 @@ test("fetchers: only this chat's addresses; chatgpt asks the download endpoint f
   await assert.rejects(claude.fetchAttachment({ pointer: null }, "c", { fetch, origin: "https://claude.ai" }), /no original/);
   const c = await claude.fetchAttachment({ pointer: "/api/f1/orig" }, "c", { fetch, origin: "https://claude.ai" });
   assert.deepEqual([...c.bytes], [9, 9]);
-  await assert.rejects(grok.fetchAttachment(), /cannot be saved yet/);
+  const calls2 = [];
+  const gfetch = async (url, init) => { calls2.push([url, init.credentials]); return { ok: true, arrayBuffer: async () => Uint8Array.from([7]).buffer, headers: { get: () => "image/png" } }; };
+  const g1 = await grok.fetchAttachment({ pointer: "https://assets.grok.com/u/g.png" }, "g", { fetch: gfetch, origin: "https://grok.com" });
+  assert.deepEqual([...g1.bytes], [7]);
+  await grok.fetchAttachment({ pointer: "https://cdn.example.net/x.png" }, "g", { fetch: gfetch, origin: "https://grok.com" });
+  assert.deepEqual(calls2.map((c) => c[1]), ["include", "omit"]);
+  await assert.rejects(grok.fetchAttachment({ pointer: "http://evil.example/x" }, "g", { fetch: gfetch, origin: "https://grok.com" }), /not an https/);
+  await assert.rejects(grok.fetchAttachment({ pointer: null }, "g", { fetch: gfetch, origin: "https://grok.com" }), /no download address/);
 });
 
 test("chatgpt: a PDF upload on a message with empty parts is kept", () => {
