@@ -12,6 +12,18 @@ Scriptorium also lets you export your chats from Claude, ChatGPT and Grok one co
 
 ## Quick start
 
+**Let your AI do it.** Copy this and send it to Claude Code:
+
+```
+Please install Scriptorium for me from github.com/SolanceLab/scriptorium.
+Follow its Quick start: start the server with a new random key you make for me, then run:
+claude plugin marketplace add SolanceLab/plugins
+claude plugin install scriptorium@solancelab
+Then guide me through the rest, step by step.
+```
+
+**Or do it yourself:**
+
 ```bash
 git clone https://github.com/SolanceLab/scriptorium && cd scriptorium
 mkdir -p "$HOME/scriptorium"
