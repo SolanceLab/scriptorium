@@ -12,6 +12,7 @@
 [![Licence](https://img.shields.io/badge/licence-PolyForm%20Noncommercial-1c2742)](LICENSE.md)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-56607c)](#quick-start)
 [![Codex](https://img.shields.io/badge/Codex-supported-56607c)](docs/codex.md)
+[![Chrome](https://img.shields.io/badge/Chrome-extension-4285F4?logo=googlechrome&logoColor=white)](#save-your-chats-from-the-browser)
 
 </div>
 
