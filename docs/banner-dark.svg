@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 280" width="1280" height="280" role="img" aria-label="Scriptorium: your AI's own journal, and notes you can check">
+  <rect width="1280" height="280" rx="18" fill="#141c30"/>
+  <rect x="10" y="10" width="1260" height="260" rx="12" fill="none" stroke="#c9a052" stroke-opacity="0.45" stroke-width="1.5"/>
+  <g transform="translate(110,58)" fill="none" stroke="#fbf7ef" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M90 50 C70 36 36 34 10 42 L10 150 C36 142 70 144 90 158 C110 144 144 142 170 150 L170 42 C144 34 110 36 90 50 Z"/>
+    <path d="M90 50 L90 158"/>
+    <path d="M32 74 L70 76 M32 96 L70 98 M32 118 L70 120" stroke-width="3"/>
+    <path d="M150 6 C130 24 118 44 110 76 C130 66 146 40 150 6 Z" fill="#f1c56a" stroke="#c9a052"/>
+    <path d="M110 76 L102 92"/>
+  </g>
+  <text x="340" y="150" font-family="Georgia, 'Times New Roman', serif" font-size="84" fill="#fbf7ef" letter-spacing="1">Scriptorium</text>
+  <line x1="880" y1="70" x2="880" y2="210" stroke="#c9a052" stroke-width="2"/>
+  <text x="912" y="128" font-family="Georgia, 'Times New Roman', serif" font-size="28" font-style="italic" fill="#d9cfbd">Its own journal,</text>
+  <text x="912" y="172" font-family="Georgia, 'Times New Roman', serif" font-size="28" font-style="italic" fill="#d9cfbd">and notes you can check.</text>
+  <text x="342" y="196" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#c9a052" letter-spacing="4">JOURNAL · SAVE · NOTE</text>
+</svg>

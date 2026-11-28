@@ -1,14 +1,42 @@
-# Scriptorium
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.svg">
+  <img src="docs/banner-light.svg" width="100%" alt="Scriptorium: your AI's own journal, and notes you can check. Journal, save, note.">
+</picture>
+
+[Quick start](#quick-start) • [What's inside](#what-it-is) • [Save your chats](#save-your-chats-from-the-browser) • [Tools](#tools) • [Support us](https://ko-fi.com/houseofsolance)
+
+[![Tests](https://img.shields.io/github/actions/workflow/status/SolanceLab/scriptorium/test.yml?branch=main&label=tests)](https://github.com/SolanceLab/scriptorium/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/SolanceLab/scriptorium?label=release&color=b5893a)](https://github.com/SolanceLab/scriptorium/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-PolyForm%20Noncommercial-1c2742)](LICENSE.md)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-56607c)](#quick-start)
+[![Codex](https://img.shields.io/badge/Codex-supported-56607c)](docs/codex.md)
+
+</div>
 
 Made by House of Solance · free for noncommercial use · credit required
 
 Scriptorium keeps your AI's journal and writes chat notes, and [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
 
+> 🆕 **New in 2.0.0:** save a chat from Claude, ChatGPT or Grok with one click in the browser, then write notes from it.
+
+<table>
+<tr>
+<td width="42%"><img src="docs/card.jpg" width="100%" alt="A cosy desk in lamplight: an open journal with a quill resting on the page, an inkwell, a stack of books, and a board above with chat bubbles drawn on pinned slips of paper. A window beside it shows a crescent moon at dusk."></td>
+<td>
+
 Your AI keeps a journal: it chooses which entries to write, revise, and pin. When you ask for chat notes, Scriptorium's notes writer reads the conversation and keeps excerpts with their source lines and dates. It can also build a card for each recurring person.
 
 Scriptorium also lets you export your chats from Claude, ChatGPT and Grok one conversation at a time, whenever you want, without waiting for the platform's official account export.
 
+</td>
+</tr>
+</table>
+
 <p align="center"><img src="docs/how-it-works.svg" width="900" alt="Your AI writes journal entries in journals it names. Your chats are saved from Claude, ChatGPT or Grok, one chat with the browser button or all of them from the official export. The notes writer checks excerpts against their source lines and produces notes, people cards, and suggestions for review."></p>
+
+**Contents:** [Quick start](#quick-start) · [Save your chats from the browser](#save-your-chats-from-the-browser) · [What it is](#what-it-is) · [Where it fits](#where-it-fits) · [What you need](#what-you-need) · [Settings](#settings) · [Tools](#tools) · [People page](#people-page) · [Limits](#limits) · [How it works](#how-it-works) · [Credit and use](#credit-and-use) · [Licence](#licence) · [Support](#support)
 
 ## Quick start
 
@@ -62,6 +90,12 @@ Unofficial: not affiliated with Anthropic, OpenAI or xAI, and a site change can 
 **Who can write entries.** Each agent writes in its own journals. A key grants write access to every agent it is bound to. A key with no agent can use the extraction tools only. The extraction tools reject paths inside the entry store, and the notes writer keeps its output in a separate folder. See [Agents](docs/agents.md) for shared keys and reading permissions.
 
 **Chat notes.** The notes writer checks excerpts against the lines they came from. It can build a card for each recurring person and, if you schedule the nightly roster, use new messages to gather what people said about themselves.
+
+## Where it fits
+
+**Fits** if you want your AI to keep its own journal, or you want notes from your Claude, ChatGPT or Grok chats that each point back to their source lines and dates.
+
+**Overkill** if you only need to search chats you already have: [Antechamber](https://github.com/SolanceLab/antechamber) finds notes and chat lines without writing anything.
 
 ## What you need
 
